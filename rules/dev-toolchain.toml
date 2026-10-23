@@ -1,0 +1,238 @@
+# 开发者工具链的缓存规则。
+#
+# 排序原则：**先写具体，再写通用**。`**/target/**` 这种通用规则放最后，
+# 让项目级的特例（比如 cpa 的 .gocache）能靠 priority 压过去。
+#
+# 每一条的 note 都是「删了要付什么代价」，不是「这是什么」——
+# 用户已经知道这是缓存，他真正不知道的是删完要等多久。
+#
+# 这份文件里只有 `auto = true` 的几条会被无人值守清理，
+# 且全部是「下次用到自动重建、不需联网」的纯缓存。
+schema_version = 1
+tool = "dev-toolchain"
+
+# ---------- Rust ----------
+
+[[rule]]
+id = "cargo-registry"
+patterns = ["~/.cargo/registry/cache/**", "~/.cargo/registry/src/**", "~/.cargo/registry/index/**"]
+what = "Rust crate 源码与索引缓存"
+verdict = { type = "costly", cost = "redownload", needs_network = true, note = "下次构建重新下载依赖，视网络 2-10 分钟" }
+
+[[rule]]
+id = "cargo-git"
+patterns = ["~/.cargo/git/**"]
+what = "Rust 依赖的 git 检出"
+verdict = { type = "costly", cost = "redownload", needs_network = true, note = "重新克隆 git 依赖" }
+
+[[rule]]
+id = "rust-target"
+patterns = ["**/target/debug/**", "**/target/release/**", "**/target/debug", "**/target/release"]
+what = "Rust 编译产物"
+stale_days = 30
+verdict = { type = "costly", cost = "recompile", note = "下次增量编译可能失效，全量重编 4-20 分钟" }
+
+[[rule]]
+id = "rust-target-misc"
+patterns = ["**/target/**"]
+what = "Rust 构建中间产物"
+stale_days = 30
+verdict = { type = "costly", cost = "recompile", note = "下次构建需要重建" }
+
+# ---------- Go ----------
+
+[[rule]]
+id = "go-build-cache"
+patterns = ["~/Library/Caches/go-build/**"]
+what = "Go 编译缓存"
+verdict = { type = "costly", cost = "recompile", note = "下次 go build 全量重编" }
+
+[[rule]]
+id = "project-gocache"
+patterns = ["**/.gocache/**"]
+what = "被指到项目里的 Go 编译缓存"
+verdict = { type = "costly", cost = "recompile", note = "下次构建重编；这类缓存本该放在系统缓存目录，长期占着项目盘" }
+
+[[rule]]
+id = "project-gomodcache"
+patterns = ["**/.gomodcache/**"]
+what = "被指到项目里的 Go 模块缓存"
+verdict = { type = "costly", cost = "redownload", needs_network = true, note = "重新下载依赖模块" }
+
+# ---------- Node / 前端 ----------
+
+[[rule]]
+id = "node-modules"
+patterns = ["**/node_modules/**"]
+what = "Node 依赖目录"
+verdict = { type = "costly", cost = "reinstall", needs_network = true, note = "下次要重新 install" }
+
+[[rule]]
+id = "npm-cache"
+patterns = ["~/.npm/_cacache/**"]
+what = "npm 下载缓存"
+verdict = { type = "reclaimable" }
+auto = true
+
+[[rule]]
+id = "pnpm-store"
+patterns = ["~/Library/pnpm/store/**", "~/.pnpm-store/**"]
+what = "pnpm 内容寻址存储（被多个项目硬链接引用）"
+verdict = { type = "costly", cost = "reinstall", needs_network = true, note = "store 里的文件被所有项目以硬链接共享，删掉后这些项目的依赖都要重新下载" }
+
+[[rule]]
+id = "pnpm-cache"
+patterns = ["~/Library/Caches/pnpm/**"]
+what = "pnpm 元数据缓存"
+verdict = { type = "reclaimable" }
+auto = true
+
+[[rule]]
+id = "frontend-build"
+patterns = ["**/dist/**", "**/.next/cache/**", "**/.nuxt/**", "**/.vite/**", "**/.turbo/**", "**/.parcel-cache/**"]
+what = "前端构建产物与打包缓存"
+verdict = { type = "costly", cost = "recompile", note = "下次构建需要重新打包" }
+
+[[rule]]
+id = "wrangler-cache"
+patterns = ["**/.wrangler/tmp/**", "**/.wrangler/cache/**"]
+what = "Cloudflare Wrangler 的本地缓存"
+verdict = { type = "reclaimable" }
+auto = true
+
+# ---------- Python ----------
+
+[[rule]]
+id = "python-venv"
+patterns = ["**/.venv/**", "**/venv/**"]
+what = "Python 虚拟环境"
+verdict = { type = "costly", cost = "reinstall", needs_network = true, note = "重新 pip install，视依赖量几分钟" }
+
+[[rule]]
+id = "pycache"
+patterns = ["**/__pycache__/**"]
+what = "Python 字节码缓存"
+verdict = { type = "reclaimable" }
+auto = true
+
+[[rule]]
+id = "python-pip-cache"
+patterns = ["~/Library/Caches/pip/**", "~/.cache/uv-cache/**", "~/.cache/uv-tools/**"]
+what = "pip / uv 下载缓存"
+verdict = { type = "reclaimable" }
+
+# ---------- Swift / 其它构建工具 ----------
+
+[[rule]]
+id = "swiftpm-cache"
+patterns = ["~/Library/Caches/org.swift.swiftpm/**", "~/Library/Caches/swift-build/**"]
+what = "SwiftPM 依赖与编译缓存"
+verdict = { type = "costly", cost = "recompile", note = "重新解析依赖并重编" }
+
+[[rule]]
+id = "generic-build-caches"
+patterns = [
+  "~/Library/Caches/node-gyp/**",
+  "~/Library/Caches/electron-builder/**",
+  "~/Library/Caches/flutter_engine/**",
+  "~/Library/Caches/bun/**",
+  "~/Library/Caches/Homebrew/**",
+]
+what = "各类构建工具的下载缓存"
+verdict = { type = "reclaimable" }
+
+[[rule]]
+id = "gradle-cache"
+patterns = ["~/.gradle/caches/**"]
+what = "Gradle 依赖与构建缓存"
+verdict = { type = "costly", cost = "redownload", needs_network = true, note = "重新下载依赖" }
+
+# ---------- 通用构建垃圾 ----------
+
+# 注意：这里刻意**不写** `**/.DS_Store`。
+# 那属于「任意层级下叫这个名字」的模式，会触发一次从家目录起的全量遍历，
+# 并且会在清单里塞进成百上千条 6 KB 的条目——把真正占地方的 target 挤出首屏，
+# 也让「可回收」那个数字失去意义。用户真正要清的是 Finder 留下的那几处。
+[[rule]]
+id = "ds-store"
+patterns = [
+  "~/Desktop/.DS_Store",
+  "~/Downloads/.DS_Store",
+  "~/Documents/.DS_Store",
+  "~/Pictures/.DS_Store",
+  "~/Movies/.DS_Store",
+  "~/Music/.DS_Store",
+]
+what = "Finder 元数据文件"
+verdict = { type = "reclaimable" }
+auto = true
+
+# ---------- Xcode / iOS 开发 ----------
+#
+# 这一段是后补的，理由是实测数据：docs/research.md 引用的 256 GB 机器上
+# DerivedData 一项就有 78 GB，而在此之前规则库里**一条都没覆盖它**——
+# 路径认得（见 gui/paths.rs 的 friendly_name），却从来没被列出来过。
+# 认得它是什么、却永远扫不到，用户看到的数字就永远是「只清了 1.5 GB」。
+
+[[rule]]
+id = "xcode-deriveddata"
+patterns = ["~/Library/Developer/Xcode/DerivedData/**"]
+what = "Xcode 的编译中间产物（每个项目一份，随编译不断膨胀）"
+stale_days = 30
+verdict = { type = "costly", cost = "recompile", est_seconds = 600, note = "下次编译从头开始，大项目 10 分钟以上" }
+
+[[rule]]
+id = "xcode-devicesupport"
+patterns = [
+  "~/Library/Developer/Xcode/iOS DeviceSupport/**",
+  "~/Library/Developer/Xcode/watchOS DeviceSupport/**",
+  "~/Library/Developer/Xcode/tvOS DeviceSupport/**",
+  "~/Library/Developer/Xcode/macOS DeviceSupport/**",
+]
+what = "真机调试用的系统符号表（每接一台新设备、每升一次系统就多一份）"
+verdict = { type = "costly", cost = "redownload", needs_network = false, note = "下次连接该设备调试时重新从设备提取，需要插着设备等几分钟" }
+
+[[rule]]
+id = "xcode-archives"
+patterns = ["~/Library/Developer/Xcode/Archives/**"]
+what = "打包归档与 dSYM（上传 App Store 的原始产物）"
+verdict = { type = "protected", reason = "user_record", note = "这是发布用的归档和符号表，删了无法重建同一个构建" }
+
+[[rule]]
+id = "xcode-userdata"
+patterns = ["~/Library/Developer/Xcode/UserData/**"]
+what = "Xcode 的代码片段、断点、界面布局"
+verdict = { type = "protected", reason = "user_record", note = "这是你的编辑器配置与调试记录" }
+
+[[rule]]
+id = "coresimulator-caches"
+patterns = ["~/Library/Developer/CoreSimulator/Caches/**"]
+what = "模拟器运行时缓存（dyld 共享缓存等）"
+verdict = { type = "costly", cost = "recompile", note = "下次启动模拟器时重建，需要等待" }
+
+# 模拟器里的设备数据是「里面装着你调试用的 app 与数据」——不是缓存。
+# 单独列出来是为了让用户看到它有多大，同时明确拦住：只能去 Xcode 里删设备。
+[[rule]]
+id = "coresimulator-devices"
+patterns = ["~/Library/Developer/CoreSimulator/Devices/**"]
+what = "模拟器设备数据（各模拟器里装的 app 与数据）"
+verdict = { type = "protected", reason = "user_record", note = "设备里的 app 数据删了找不回，请在 Xcode 的 Devices 里管理" }
+
+[[rule]]
+id = "cocoapods-cache"
+patterns = ["~/Library/Caches/CocoaPods/**"]
+what = "CocoaPods 的 pod 源码与下载缓存"
+verdict = { type = "costly", cost = "redownload", needs_network = true, note = "下次 pod install 重新下载依赖" }
+
+# ---------- Docker ----------
+#
+# 只列磁盘镜像本体，不列整个 `com.docker.docker` 容器目录：
+# 同目录下还有设置、证书、容器元数据，按父目录删会连配置一起端掉。
+# Docker.raw 里是用户 pull 下来的镜像和所有容器——那是工作成果，不是缓存，
+# 所以判受保护：工具只负责告诉他「它有多大」，删不删由 Docker 自己决定。
+[[rule]]
+id = "docker-disk-image"
+patterns = ["~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"]
+kind = "file"
+what = "Docker 的磁盘镜像（镜像与容器的全部内容）"
+verdict = { type = "protected", reason = "user_record", note = "里面是全部镜像和容器，请用 docker system prune 清理" }

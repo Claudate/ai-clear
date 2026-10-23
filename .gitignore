@@ -1,0 +1,16 @@
+# 构建产物
+/target
+**/*.rs.bk
+
+# IDE / 辅助
+.mrdayone/
+.DS_Store
+*.swp
+*.swo
+
+# 本地配置与密钥（只提交 .example）
+.env
+*.pem
+*.key
+*.p12
+*.mobileprovision

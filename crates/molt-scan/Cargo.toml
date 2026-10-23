@@ -1,0 +1,12 @@
+[package]
+name = "molt-scan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "0.2.191"
+molt-core.workspace = true
+molt-safety.workspace = true
+
+[dev-dependencies]

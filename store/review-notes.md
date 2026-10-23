@@ -1,0 +1,71 @@
+# 审核备注（App Review Information → Notes）
+
+直接把下面这段贴进 App Store Connect 的「备注」框。它是给审核员看的，不是
+商店页文案，所以写的是「怎么在五分钟内验完」，不是卖点。
+
+---
+
+Molt is a disk cleanup tool for developer caches on macOS. It scans for caches
+left by AI coding tools (Cursor, Claude Code, Codex, VS Code) and build outputs
+(Rust `target`, `node_modules`, package manager caches), explains what deleting
+each item would cost, and by default **moves** items to a quarantine folder
+instead of deleting them.
+
+**No account or sign-in is required.** Every feature is available on first launch.
+
+## How to test in a few minutes
+
+1. Launch the app. It opens on the overview page. Press "重新扫描" / Rescan to
+   scan the current Mac. On a fresh machine this takes a few seconds.
+2. Open the "清单" (List) tab to see every item with its size and a one-line
+   explanation of what deleting it costs.
+3. Select a few items and press "移入隔离区" (Move to quarantine). A confirmation
+   dialog appears first. Nothing is deleted — items can be restored from the
+   "隔离区" (Quarantine) tab for 7 days.
+4. To verify restoration, open the Quarantine tab and press restore.
+
+## Full Disk Access
+
+Scanning caches under `~/Library` requires Full Disk Access
+(System Settings → Privacy & Security → Full Disk Access). Without it the app
+still runs and scans what it can reach, and the UI explicitly lists the folders
+it could not read — it never reports a failed scan as "nothing to clean".
+
+## AI analysis is optional and off by default
+
+The "AI 分析" (AI analysis) tab is disabled unless the reviewer configures a
+model provider. **No provider is preconfigured with a key, and no network
+request is made unless a key is entered.** This is why the feature can be
+reviewed without credentials: leave it unconfigured and the tab explains how to
+set it up.
+
+If you want to exercise it, any OpenAI-compatible endpoint works, including a
+local Ollama instance. The scan summary sent to the provider contains file
+metadata only (paths relative to the home folder, sizes, file counts, verdicts);
+file contents are excluded unless content sampling is explicitly enabled, and
+samples are dropped when they match a secret fingerprint.
+
+## Destructive actions
+
+The app never deletes files without an explicit second confirmation. There are
+two separate actions with distinct labels and colors: "移入隔离区" (move to
+quarantine, restorable) and "直接清理" (permanent delete, requires an additional
+confirmation that names the exact items and count). The permanent-delete action
+is styled in red and is never the default.
+
+## Privacy
+
+Scanning and verdicts happen entirely on-device. See the privacy policy URL
+provided in App Store Connect.
+
+---
+
+## 审核联系人
+
+App Store Connect 的「审核信息」里还要填一个真实可联系的人：
+
+- 姓名、电话、邮箱：填你自己的。
+- 「演示账号」一栏：本 App 没有登录，填「无需登录 / Not required」。
+
+审核被拒时 Apple 会先发邮件再到 Resolution Center 留言，通常给 24–48 小时
+回应；联系方式不实是常见的不必要延误。

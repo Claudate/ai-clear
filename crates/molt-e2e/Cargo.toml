@@ -1,0 +1,17 @@
+[package]
+name = "molt-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "e2e"
+path = "src/main.rs"
+
+[dependencies]
+molt-core.workspace = true
+molt-safety.workspace = true
+molt-scan.workspace = true
+molt-act.workspace = true
+molt-rules.workspace = true

@@ -1,0 +1,169 @@
+# molt 的 fastlane 配置。
+#
+# 三条 lane 分别对应上架的三件事，可以分开跑，也可以一次跑完：
+#
+#   fastlane ios metadata   # 只同步商店页（文案 + 截图），不动二进制
+#   fastlane ios upload     # 只传二进制（.pkg），不动商店页
+#   fastlane ios release    # 传二进制 → 等处理 → 同步商店页 → 提审
+#
+# 凭什么：全部读环境变量，仓库里不放任何密钥。
+#   ASC_API_KEY_ID / ASC_API_ISSUER_ID / ASC_API_KEY_CONTENT
+#   （fastlane 也认 ASC_API_KEY_PATH，指向 .p8 文件）
+#   ASC_TEAM_ID
+#
+# 不想用 API 密钥时改用 Apple ID：
+#   ASC_APPLE_ID / ASC_APP_PASSWORD（应用专用密码）+ ASC_TEAM_ID
+#
+# App 的 bundle id 与版本号写死在这里，与 store/bundle/Info.plist 保持一致：
+# Beta 版发出去的版本号写错比什么都难查。
+
+require 'shellwords'
+
+default_platform(:ios)
+
+APP_IDENTIFIER = "app.molt.mac"
+APP_VERSION    = "0.1.0"
+
+# 商店文案的语言。deliver 按 locale 目录名找 fastlane/metadata/<locale>/。
+LOCALES = ["zh-Hans", "en-US"]
+
+# 团队号从已签名证书里读，不让人手填——手填容易抄错，且证书里就有。
+# 读不到时才退回环境变量 ASC_TEAM_ID。
+def team_id_from_cert
+  out = `security find-identity -v -p basic 2>/dev/null`
+  id = out[/\(([A-Z0-9]{10})\)/, 1]
+  id.to_s.empty? ? ENV["ASC_TEAM_ID"] : id
+end
+
+# 凭据统一从环境变量读。这个函数在两处被用到：deliver 的 api_key 与 pilot 的
+# 上传通道。返回 nil 表示「没配 API 密钥，让 fastlane 回退到 Apple ID」。
+def api_key_from_env
+  key_id    = ENV["ASC_API_KEY_ID"]
+  issuer_id = ENV["ASC_API_ISSUER_ID"]
+  return nil if key_id.to_s.empty? || issuer_id.to_s.empty?
+
+  key_path = ENV["ASC_API_KEY_PATH"]
+  key_path ||= File.expand_path("~/.appstoreconnect/private_keys/AuthKey_#{key_id}.p8")
+  key_path = File.expand_path("~/.private_keys/AuthKey_#{key_id}.p8") unless File.exist?(key_path)
+
+  if File.exist?(key_path)
+    app_store_connect_api_key(
+      key_id: key_id,
+      issuer_id: issuer_id,
+      key_filepath: key_path,
+    )
+  elsif ENV["ASC_API_KEY_CONTENT"]
+    app_store_connect_api_key(
+      key_id: key_id,
+      issuer_id: issuer_id,
+      key_content: ENV["ASC_API_KEY_CONTENT"],
+    )
+  else
+    UI.user_error!("设了 ASC_API_KEY_ID 但找不到 .p8。放到 ~/.appstoreconnect/private_keys/AuthKey_#{key_id}.p8，或设 ASC_API_KEY_PATH。")
+  end
+end
+
+platform :ios do
+  # 前置检查。快失败好过传到一半才发现少个 URL。
+  desc "检查上架所需的一切是否就位"
+  lane :preflight do
+    missing = []
+
+    key = api_key_from_env
+    missing << "ASC_API_KEY_ID / ASC_API_ISSUER_ID" if key.nil? && ENV["ASC_APPLE_ID"].to_s.empty?
+    # Team ID 能从证书读就不算缺；读不到才要人给。
+    missing << "ASC_TEAM_ID（证书里也读不到）" if team_id_from_cert.to_s.empty?
+
+    LOCALES.each do |locale|
+      dir = File.expand_path("metadata/#{locale}", __dir__)
+      %w[name subtitle keywords description].each do |field|
+        path = File.join(dir, "#{field}.txt")
+        missing << "#{locale}/#{field}.txt" unless File.exist?(path)
+      end
+
+      %w[support_url privacy_url].each do |field|
+        path = File.join(dir, "#{field}.txt")
+        if !File.exist?(path)
+          missing << "#{locale}/#{field}.txt"
+        else
+          value = File.read(path).strip
+          # 占位值不能过：Apple 会实际抓这个地址，抓不到就提交不了。
+          missing << "#{locale}/#{field}.txt（仍是占位值：#{value}）" if value.include?("example.com") || value.empty?
+        end
+      end
+
+      shots = Dir.glob(File.expand_path("screenshots/#{locale}/*.png", __dir__))
+      missing << "screenshots/#{locale}/（至少要 1 张，现在 #{shots.size} 张）" if shots.empty?
+    end
+
+    pkg = Dir.glob(File.expand_path("../target/dist/*.pkg", __dir__)).max_by { |f| File.mtime(f) }
+    missing << "target/dist/*.pkg（先跑 ./store/build_app.sh mas）" if pkg.nil?
+
+    if missing.empty?
+      UI.success("前置检查通过。二进制：#{File.basename(pkg)}")
+    else
+      missing.each { |m| UI.error("缺：#{m}") }
+      UI.user_error!("前置检查未通过，共 #{missing.size} 项。")
+    end
+  end
+
+  desc "同步商店页文案与截图（不传二进制）"
+  lane :metadata do
+    preflight
+
+    deliver(
+      api_key: api_key_from_env,
+      app_identifier: APP_IDENTIFIER,
+      app_version: APP_VERSION,
+      username: ENV["ASC_APPLE_ID"],
+      team_id: team_id_from_cert,
+      # 只更新商店页，二进制走 upload lane。
+      skip_binary_upload: true,
+      # 不自动提审：提审前要人工确认截图与文案。
+      submit_for_review: false,
+      force: true,
+      # 截图与文案都从 store/ 同步过来的那一份取。
+      metadata_path: File.expand_path("metadata", __dir__),
+      screenshots_path: File.expand_path("screenshots", __dir__),
+      # 别让 deliver 覆盖我们没在这个目录里维护的字段（价格、分级等）。
+      overwrite_screenshots: true,
+      # App 隐私问卷不在 deliver 的范围里，只能在网页或 API 上填。
+      precheck_include_in_app_purchases: false,
+    )
+
+    UI.success("商店页已同步。App 隐私问卷仍需在 App Store Connect 网页端确认。")
+  end
+
+  desc "上传已签名的 .pkg（等价于 Xcode Organizer 的 Distribute）"
+  lane :upload do
+    pkg = Dir.glob(File.expand_path("../target/dist/*.pkg", __dir__))
+             .select { |f| system("pkgutil --check-signature #{Shellwords.escape(f)} > /dev/null 2>&1") }
+             .max_by { |f| File.mtime(f) }
+
+    UI.user_error!("target/dist 下没有已签名的 .pkg。先跑 ./store/build_app.sh mas，必要时 ./store/tools/sign_pkg.sh") if pkg.nil?
+
+    UI.message("上传 #{File.basename(pkg)}")
+    # upload_to_app_store 的二进制通道对 macOS 支持不稳，这里直接调 Transporter，
+    # 与 store/tools/upload.sh 同一条路，避免两套逻辑给出不同结果。
+    sh(File.expand_path("../tools/upload.sh", __dir__))
+  end
+
+  desc "完整上架：传二进制 → 等处理 → 同步商店页"
+  lane :release do
+    upload
+    # 处理时间通常 5–20 分钟；先等一会再去改商店页，避免版本还没有构建就提审。
+    UI.message("等 App Store Connect 处理构建（最长 30 分钟）…")
+    begin
+      latest_testflight_build_number(
+        app_identifier: APP_IDENTIFIER,
+        api_key: api_key_from_env,
+        username: ENV["ASC_APPLE_ID"],
+        team_id: team_id_from_cert,
+      )
+    rescue => e
+      UI.important("还查不到构建（#{e.message}）。稍后手动跑 fastlane ios metadata。")
+    end
+    metadata
+    UI.success("二进制与商店页都已就位。提审请在 App Store Connect 网页端点「提交以供审核」。")
+  end
+end

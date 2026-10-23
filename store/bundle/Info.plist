@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  molt.app 的 Info.plist。打包脚本用 __VERSION__ / __BUILD__ 占位符替换后写进 bundle，
+  版本号唯一来源是 Cargo.toml 的 workspace.package.version，不要在这里另写一份。
+
+  LSMinimumSystemVersion 取 13.0：eframe 0.37 的 wgpu 后端要求 Metal，
+  13 是仍能跑 Metal 3 又不至于把用户挡在门外的下限。
+  CFBundleIconFile 指向 Resources/AppIcon.icns（由 store/icon.iconset 打包而来）。
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleExecutable</key>
+    <string>molt-gui</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>__BUNDLE_ID__</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>蜕</string>
+    <key>CFBundleDisplayName</key>
+    <string>蜕 · Molt</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__BUILD__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 DIGITAL BANG INTELLIGENCE LLC. MIT License.</string>
+
+    <!--
+      扫描对象是 ~/Library 下的缓存与家目录里的构建产物，Apple 在 App Review 里
+      会问到用途，所以这里写清楚可读的用途说明（会显示在授权弹窗旁）。
+      完全磁盘访问没有专门的用途键，权限本身由用户在系统设置里授予。
+    -->
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>收需要读取项目目录里的构建产物（如 target、node_modules）来计算可以回收多少空间。只读，不会修改文件。</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>收需要读取下载目录里的缓存文件来计算可以回收多少空间。只读，不会修改文件。</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>收需要读取桌面上的项目目录来计算可以回收多少空间。只读，不会修改文件。</string>
+
+    <!-- 程序不含 PyObjC 之类的脚本桥，显式关闭以缩小攻击面。 -->
+    <key>NSAppleScriptEnabled</key>
+    <false/>
+</dict>
+</plist>

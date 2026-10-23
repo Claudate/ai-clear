@@ -1,0 +1,8 @@
+First release.
+
+· Scans caches from Cursor, Claude Code, Codex and VS Code, plus Rust / Node / Go build artifacts
+· Three verdicts — reclaimable, costly, protected — each with a sentence on what deleting costs
+· Moves items to quarantine first, restorable for 7 days; direct delete available when you need space now
+· Unattended cleanup that only touches items marked as pure cache
+· Optional AI analysis: a model explains and proposes, every item is verified locally before anything runs
+· Dark mode and larger text

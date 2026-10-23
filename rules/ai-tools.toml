@@ -1,0 +1,207 @@
+# AI 编程工具的缓存规则。
+#
+# 判定依据只有一个问题：**这是记录，还是可再生的东西？**
+# 会话历史、文件版本历史是记录（Protected）；Chromium 缓存、索引是缓存（Reclaimable）。
+#
+# 这里刻意不写 `~/Library/Application Support/Code/**` 这类父级规则——
+# 那个目录里同时有 `Code Cache`（可再生）和 `User/History`（你的文件版本记录），
+# 按父级判定一次就会连带删掉历史版本。
+schema_version = 1
+tool = "ai-tools"
+
+# ---------- Codex ----------
+#
+# `auto = true` 的取舍标准（全规则库统一）：
+# 删了自动重建、不需联网、不破坏引用、不丢记录，重建成本低于一秒。
+# 构建产物（target、node_modules、各类下载缓存）一律不标——虽然能重建，
+# 但一次无人值守的清理会让用户第二天开机就面对十分钟的重编。
+
+[[rule]]
+id = "codex-sessions"
+patterns = ["~/.codex/sessions/**", "~/.codex/memories/**", "~/.codex/vendor_imports/**"]
+what = "Codex 会话与记忆（你的对话记录）"
+verdict = { type = "protected", reason = "user_record", note = "这是记录不是缓存，删了找不回" }
+
+[[rule]]
+id = "codex-logs"
+patterns = ["~/.codex/tmp/**", "~/.codex/.tmp/**", "~/.codex/shell_snapshots/**"]
+what = "Codex 临时文件与会话快照"
+verdict = { type = "reclaimable" }
+auto = true
+
+[[rule]]
+id = "codex-desktop-cache"
+patterns = [
+  "~/Library/Application Support/Codex/Cache/**",
+  "~/Library/Application Support/Codex/Code Cache/**",
+  "~/Library/Application Support/Codex/GPUCache/**",
+  "~/Library/Application Support/Codex/DawnGraphiteCache/**",
+  "~/Library/Application Support/Codex/DawnWebGPUCache/**",
+  "~/Library/Application Support/Codex/blob_storage/**",
+  "~/Library/Application Support/Codex/Crashpad/**",
+  "~/Library/Application Support/Codex/Session Storage/**",
+  "~/Library/Application Support/Codex/sentry/**",
+]
+what = "Codex 桌面的浏览器内核缓存"
+verdict = { type = "reclaimable" }
+# 与 cursor-cache / vscode-cache 同类：纯 Chromium 内核缓存，删了自动重建、
+# 不联网、不掉登录态。原先漏标，导致无人值守清理基本无事可做。
+# 刻意不含 `Session Storage`——它影响窗口恢复，不是纯缓存。
+auto = true
+
+[[rule]]
+id = "codex-shared-cache"
+patterns = ["~/Library/Caches/com.openai.codex/**"]
+what = "Codex 客户端缓存"
+verdict = { type = "reclaimable" }
+auto = true
+
+# ---------- Claude Code / Claude 桌面 ----------
+
+[[rule]]
+id = "claude-projects"
+patterns = [
+  "~/.claude/projects/**",
+  "~/.claude/file-history/**",
+  "~/.claude/plans/**",
+  "~/.claude/sessions/**",
+  "~/.claude/backups/**",
+]
+what = "Claude Code 的对话与文件历史"
+verdict = { type = "protected", reason = "user_record", note = "删了这些对话和改动历史就找不回" }
+
+[[rule]]
+id = "claude-cache"
+patterns = [
+  "~/.claude/cache/**",
+  "~/.claude/paste-cache/**",
+  "~/.claude/debug/**",
+  "~/.claude/shell-snapshots/**",
+  "~/.claude/scratchpad/**",
+  "~/.claude/downloads/**",
+  "~/Library/Caches/claude-cli-nodejs/**",
+]
+what = "Claude Code 的临时缓存与调试日志"
+verdict = { type = "reclaimable" }
+auto = true
+
+# ---------- Cursor / VS Code / Windsurf / Trae / Kiro（同一个 VS Code 内核） ----------
+#
+# 这几款是 VS Code 的 fork，目录结构一致：
+# Library/Application Support/<App>/User/History 等。
+# 单独写 Cursor 而不是靠通配，是因为将来某款改了目录名时，
+# 出问题能立刻定位到具体一条规则。
+
+[[rule]]
+id = "cursor-history"
+patterns = ["~/Library/Application Support/Cursor/User/History/**"]
+what = "Cursor 的文件历史快照（AI 改得越勤涨得越快）"
+verdict = { type = "costly", cost = "lose_record", note = "会丢失这些文件在本地的历史版本，当前文件不受影响" }
+
+[[rule]]
+id = "cursor-workspace-storage"
+patterns = ["~/Library/Application Support/Cursor/User/workspaceStorage/**"]
+what = "Cursor 各窗口的工作区状态"
+verdict = { type = "costly", cost = "reindex", note = "重新打开项目时需要重建窗口状态" }
+
+[[rule]]
+id = "cursor-cache"
+patterns = [
+  "~/Library/Application Support/Cursor/Cache/**",
+  "~/Library/Application Support/Cursor/CachedData/**",
+  "~/Library/Application Support/Cursor/CachedExtensionVSIXs/**",
+  "~/Library/Application Support/Cursor/Code Cache/**",
+  "~/Library/Application Support/Cursor/GPUCache/**",
+  "~/Library/Application Support/Cursor/DawnGraphiteCache/**",
+  "~/Library/Application Support/Cursor/DawnWebGPUCache/**",
+  "~/Library/Application Support/Cursor/Crashpad/**",
+  "~/Library/Caches/cursor-compile-cache/**",
+]
+what = "Cursor 的编译与渲染缓存"
+verdict = { type = "reclaimable" }
+auto = true
+
+[[rule]]
+id = "vscode-history"
+patterns = ["~/Library/Application Support/Code/User/History/**"]
+what = "VS Code 的文件历史快照"
+verdict = { type = "costly", cost = "lose_record", note = "会丢失这些文件在本地的历史版本" }
+
+[[rule]]
+id = "vscode-workspace-storage"
+patterns = ["~/Library/Application Support/Code/User/workspaceStorage/**"]
+what = "VS Code 各窗口的工作区状态"
+verdict = { type = "costly", cost = "reindex", note = "重新打开项目时需要重建窗口状态" }
+
+[[rule]]
+id = "vscode-cache"
+patterns = [
+  "~/Library/Application Support/Code/Cache/**",
+  "~/Library/Application Support/Code/CachedData/**",
+  "~/Library/Application Support/Code/CachedExtensionVSIXs/**",
+  "~/Library/Application Support/Code/CachedProfilesData/**",
+  "~/Library/Application Support/Code/CachedConfigurations/**",
+  "~/Library/Application Support/Code/Code Cache/**",
+  "~/Library/Application Support/Code/GPUCache/**",
+  "~/Library/Application Support/Code/DawnGraphiteCache/**",
+  "~/Library/Application Support/Code/DawnWebGPUCache/**",
+  "~/Library/Application Support/Code/Crashpad/**",
+  "~/Library/Application Support/Code/logs/**",
+  "~/Library/Application Support/Code/copilot-terminal-output/**",
+]
+what = "VS Code 的缓存与日志"
+verdict = { type = "reclaimable" }
+auto = true
+
+[[rule]]
+id = "vscode-agent-sessions"
+patterns = [
+  "~/Library/Application Support/Code/agentSessionData/**",
+  "~/Library/Application Support/Code/User/globalStorage/**",
+]
+what = "编辑器的 AI 会话与扩展数据"
+verdict = { type = "costly", cost = "lose_record", note = "含扩展的本地数据，删了部分设置会重置" }
+
+[[rule]]
+id = "vscode-backups"
+patterns = ["~/Library/Application Support/Code/Backups/**"]
+what = "VS Code 未保存文件的自动备份"
+verdict = { type = "costly", cost = "lose_record", note = "若编辑器里有未保存的改动，备份是最后一份" }
+
+# ---------- 其它 AI 客户端 ----------
+
+[[rule]]
+id = "other-ai-caches"
+patterns = [
+  "~/Library/Caches/kimi-code/**",
+  "~/Library/Caches/copilot/**",
+  "~/Library/Caches/dev.biomejs.biome/**",
+  "~/Library/Caches/com.vercel.cli/**",
+  "~/Library/Caches/cco-desktop/**",
+  "~/Library/Caches/cue-desktop/**",
+  "~/Library/Caches/devin-desktop/**",
+  "~/Library/Caches/com.workbuddy.workbuddy-ai/**",
+  "~/Library/Caches/com.trae.solo.app/**",
+  "~/Library/Caches/com.exafunction.windsurf/**",
+  "~/Library/Caches/com.kiro.account-manager/**",
+  "~/.cache/kilo/**",
+  "~/.cache/opencode/**",
+  "~/.cache/magpie/**",
+  "~/.cache/devin/**",
+  "~/.cache/claude/**",
+]
+what = "其它 AI 客户端的缓存"
+verdict = { type = "reclaimable" }
+auto = true
+
+[[rule]]
+id = "hf-models"
+patterns = ["~/.cache/huggingface/**"]
+what = "HuggingFace 下载的模型权重"
+verdict = { type = "costly", cost = "redownload", needs_network = true, note = "重新下载，单个模型可能数 GB" }
+
+[[rule]]
+id = "playwright-browsers"
+patterns = ["~/Library/Caches/ms-playwright/**", "~/Library/Caches/org.webkit.Playwright/**"]
+what = "Playwright 下载的浏览器内核"
+verdict = { type = "costly", cost = "redownload", needs_network = true, note = "重新下载，通常数百 MB" }

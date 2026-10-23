@@ -1,0 +1,32 @@
+Molt does one thing: it reclaims the space that AI coding tools and build processes leave behind.
+
+It does not touch system junk, and it is not a "one-click speed up". It cleans the caches that Cursor, Claude Code, Codex and VS Code scatter around, plus Rust target directories, node_modules and package manager caches — things that rebuild themselves but keep growing.
+
+Why it exists
+Space on a developer's Mac is rarely "system junk". It is a pile of things you genuinely need but do not need to keep forever: a 26 GB target folder in one project, dozens of node_modules, the file history Cursor quietly stores. The system storage panel folds all of it into a single gray bar called System Data and never tells you which part is safe to remove.
+
+Three rules it does not break
+1. Scanning only reads. A scan writes nothing, moves nothing, deletes nothing.
+2. By default it moves, it does not delete. After you confirm, items go to a quarantine area and can be put back for 7 days. Releasing space immediately requires explicitly choosing Direct Delete, which asks for another confirmation.
+3. Protected things cannot get in. Keys, configuration and session history are blocked by hard-coded guards built into the binary, so even a broken rule file cannot get past them.
+
+Every item says what deleting costs
+Not three colored dots, but a sentence specific enough to decide on:
+· Reclaimable — rebuilds itself automatically, no impact on use.
+· Costly — space is freed, but the next build or download has to happen again; the note says roughly how long it takes.
+· Protected — your records, keys and configuration. Never moved.
+
+Costly items are unchecked by default. Build artifacts are usually the biggest thing on disk, but an unattended cleanup would leave you waiting ten minutes for a rebuild the next morning — that decision is yours, not the app's.
+
+Also included
+· Grouped by project, so you can see which project's target folder is taking tens of gigabytes.
+· Unattended cleanup only touches items marked as pure cache in the rule set; build artifacts are never cleaned automatically.
+· History and audit log, each entry marked as manual or scheduled.
+· Dark mode and a larger text size, following the system appearance.
+· Optional AI analysis: ask a model to explain what something is and propose a plan. Every proposed item is then verified locally — a path the model mentions must appear verbatim in this scan's results, protected items and paths outside your home folder are rejected, and freed space is recomputed from real measurements rather than the model's numbers. Everything works without any model configured.
+
+Privacy
+Scanning happens on your Mac. The file list and verdicts are never uploaded. Only when you choose to use AI analysis and configure your own model provider is a summary of the current scan (paths, sizes, categories) sent to that provider. If you do not configure one, nothing is sent. See the privacy policy for details.
+
+About permissions
+To scan caches under ~/Library, macOS asks you to grant Full Disk Access in System Settings → Privacy & Security. Molt works without it, just with a smaller scope, and the app tells you exactly which folders it could not read.

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Developer ID 直供版（非沙箱）。用 --options runtime 开启硬化运行时后签名，
+  再交给 notarytool 公证，用户下载双击即可打开。
+
+  这里刻意留成最小集合：wgpu/Metal 不需要 JIT 或可写可执行内存，
+  给了反而扩大攻击面，也让审核多一个要解释的点。
+-->
+<plist version="1.0">
+<dict>
+    <!--
+      不开沙箱是有意的：要扫描 ~/.claude、~/.codex、~/Library/Caches
+      这些家目录下的路径。沙箱版会拿不到这些路径，见 molt-mas.entitlements。
+    -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+</dict>
+</plist>

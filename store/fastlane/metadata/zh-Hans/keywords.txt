@@ -1,0 +1,1 @@
+磁盘清理,空间不足,开发缓存,构建产物,硬盘,瘦身,Rust,target,Cursor,Claude,Codex

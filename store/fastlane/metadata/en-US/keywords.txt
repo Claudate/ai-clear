@@ -1,0 +1,1 @@
+disk cleanup,cache,developer,Xcode,node_modules,Rust,Cursor,Claude,Codex,storage,space

@@ -1,0 +1,1 @@
+Cursor、Claude Code、Codex 留下的缓存，加上 target 和 node_modules，往往几十 GB。收只做一件事：逐条告诉你每一项删了会怎样，默认只移走不删，7 天内可还原。

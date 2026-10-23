@@ -1,0 +1,279 @@
+//! 历史页：发生过什么。**只读**时间线。
+//!
+//! 这一页以前同时承担了「隔离区」的职责（列待还原 + 还原按钮），
+//! 于是同一批东西在这里能操作、在别处找不到，用户分不清哪一页才是「我的文件」。
+//! 现在职责分开了：
+//!
+//! - 隔离区：还能拿回来的内容，在那里还原或彻底删除
+//! - 历史：每条操作事件的时间线，回答「谁在什么时候动了什么」
+//!
+//! 四种状态都要分开画：空、读失败、正常、大量条目。
+//! 「读失败」绝不能被画成「空」。
+
+use eframe::egui;
+
+use crate::state::{AppState, HistoryAction, HistoryRow};
+use crate::theme::Palette;
+use crate::widgets::{badge, card, page_header, primary_button, secondary_button, state_block};
+
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
+    page_header(
+        ui,
+        p,
+        "历史",
+        "每一次清理都留一条记录：移入隔离区、还原、彻底删除各自一行。",
+        |ui| {
+            if secondary_button(ui, p, "刷新", true) {
+                reload(state);
+            }
+        },
+    );
+    ui.add_space(12.0);
+
+    // 读失败优先于「空」：这两件事长得像，但对用户的含义完全相反。
+    if let Some(err) = state.history_error.clone() {
+        card(ui, p, |ui| {
+            ui.label(
+                egui::RichText::new("读不到历史记录")
+                    .size(p.sz(15.0))
+                    .strong()
+                    .color(p.danger),
+            );
+            ui.add_space(3.0);
+            ui.add(
+                egui::Label::new(egui::RichText::new(&err).size(p.sz(12.0)).color(p.text_dim))
+                    .wrap_mode(egui::TextWrapMode::Wrap),
+            );
+            ui.add_space(10.0);
+            if primary_button(ui, p, "重试", true) {
+                reload(state);
+            }
+        });
+        return;
+    }
+
+    if state.history.is_empty() {
+        state_block(
+            ui,
+            p,
+            "○",
+            "还没有操作记录",
+            "清理、还原、彻底删除都会在这里留下一条。现在还是空的。",
+            p.text_faint,
+        );
+        return;
+    }
+
+    // 汇总：已经永久消失了多少。用户打开这页常常是想确认「到底删掉过什么」。
+    let purged: Vec<&HistoryRow> = state
+        .history
+        .iter()
+        .filter(|r| matches!(r.action, HistoryAction::Purged | HistoryAction::Deleted))
+        .collect();
+    let purged_bytes: u64 = purged.iter().map(|r| r.bytes).sum();
+    let quarantined = state
+        .history
+        .iter()
+        .filter(|r| r.action == HistoryAction::Quarantined)
+        .count();
+
+    card(ui, p, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.vertical(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("{} 条记录", state.history.len()))
+                            .size(p.sz(22.0))
+                            .strong(),
+                    )
+                    .wrap_mode(egui::TextWrapMode::Extend),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} 项曾移入隔离区 · 累计永久删除 {}",
+                        quarantined,
+                        molt_scan::human_bytes(purged_bytes)
+                    ))
+                    .size(p.sz(11.5))
+                    .color(p.text_dim),
+                );
+            });
+            ui.add_space(20.0);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("要还原或从隔离区彻底删除，请到「隔离区」页。")
+                        .size(p.sz(11.5))
+                        .color(p.text_faint),
+                )
+                .wrap_mode(egui::TextWrapMode::Wrap),
+            );
+        });
+    });
+    ui.add_space(10.0);
+
+    // 虚拟滚动：历史会一直累积，全量绘制会掉帧。
+    let row_h = p.sz(70.0);
+    let total = state.history.len();
+    let rows = state.history.clone();
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show_rows(ui, row_h, total, |ui, range| {
+            for i in range {
+                if let Some(row) = rows.get(i) {
+                    line(ui, state, p, row);
+                }
+            }
+        });
+}
+
+/// 一行历史事件。没有操作按钮——这一页只回答「发生过什么」。
+fn line(ui: &mut egui::Ui, state: &AppState, p: &Palette, row: &HistoryRow) {
+    let (tint, soft) = match row.action {
+        HistoryAction::Quarantined => (p.reclaimable, p.accent_soft),
+        HistoryAction::Restored => (p.text_dim, p.surface_alt),
+        HistoryAction::Purged => (p.danger, p.danger_soft),
+        HistoryAction::Deleted => (p.danger, p.danger_soft),
+    };
+    let full_w = ui.available_width();
+
+    egui::Frame::NONE
+        .fill(p.surface)
+        .stroke(egui::Stroke::new(1.0, p.border))
+        .corner_radius(egui::CornerRadius::same(crate::theme::RADIUS_CONTROL))
+        .inner_margin(egui::Margin::symmetric(14, 9))
+        .show(ui, |ui| {
+            ui.set_width(full_w - 30.0);
+            ui.horizontal(|ui| {
+                let size_w = p.sz(84.0);
+                let left_w = (ui.available_width() - size_w - 12.0).max(p.sz(140.0));
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left_w, p.sz(48.0)),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.horizontal(|ui| {
+                            badge(ui, p, row.action.label(), tint, soft);
+                            ui.add_space(4.0);
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(crate::paths::friendly_name(
+                                        &state.home,
+                                        std::path::Path::new(&row.path),
+                                    ))
+                                    .size(p.sz(12.0))
+                                    .strong()
+                                    .color(p.text),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Truncate),
+                            );
+                        });
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&row.path)
+                                    .size(p.sz(10.0))
+                                    .monospace()
+                                    .color(p.text_faint),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Truncate),
+                        );
+                        ui.horizontal(|ui| {
+                            // 来源：有人看着做的，还是定时任务自己做的。
+                            match row.source {
+                                molt_act::CleanSource::Auto => {
+                                    badge(ui, p, "自动", p.costly, p.costly_soft)
+                                }
+                                molt_act::CleanSource::Manual => {
+                                    badge(ui, p, "手动", p.text_dim, p.surface_alt)
+                                }
+                            }
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(short_time(&row.at))
+                                        .size(p.sz(10.0))
+                                        .color(p.text_faint),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                            );
+                        });
+                    },
+                );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(molt_scan::human_bytes(row.bytes))
+                                .size(p.sz(12.5))
+                                .strong()
+                                .color(
+                                    if matches!(
+                                        row.action,
+                                        HistoryAction::Purged | HistoryAction::Deleted
+                                    ) {
+                                        p.text_dim
+                                    } else {
+                                        p.text
+                                    },
+                                ),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                    );
+                });
+            });
+        });
+}
+
+fn short_time(iso: &str) -> String {
+    if iso.len() >= 16 {
+        format!("{} {}", &iso[0..10], &iso[11..16])
+    } else {
+        iso.to_string()
+    }
+}
+
+pub fn reload(state: &mut AppState) {
+    let store = match molt_act::AuditStore::open(&crate::paths::audit_db()) {
+        Ok(s) => s,
+        Err(e) => {
+            state.history_error = Some(format!("打开审计库失败：{e}"));
+            state.history.clear();
+            return;
+        }
+    };
+    match store.list_all(2000) {
+        Ok(recs) => {
+            let home = state.home.clone();
+            state.history = recs
+                .into_iter()
+                .map(|r| {
+                    let action = match r.action {
+                        molt_act::ActionKind::Quarantine => HistoryAction::Quarantined,
+                        molt_act::ActionKind::Restore => HistoryAction::Restored,
+                        molt_act::ActionKind::Purge => {
+                            // 直接清理没有隔离路径；经隔离的清除才有。
+                            if r.quarantine_path.as_os_str().is_empty() {
+                                HistoryAction::Deleted
+                            } else {
+                                HistoryAction::Purged
+                            }
+                        }
+                    };
+                    HistoryRow {
+                        id: r.id,
+                        path: crate::paths::display_in(&home, &r.absolute_path),
+                        bytes: r.bytes,
+                        at: r.performed_at.clone(),
+                        source: r.source,
+                        action,
+                    }
+                })
+                .collect();
+            state.history_error = None;
+        }
+        Err(e) => {
+            state.history_error = Some(format!("读取审计库失败：{e}"));
+            state.history.clear();
+        }
+    }
+}

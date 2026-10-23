@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/molt-core",
+    "crates/molt-safety",
+    "crates/molt-scan",
+    "crates/molt-act",
+    "crates/molt-rules",
+    "crates/molt-ai",
+    "crates/molt-cli",
+    "crates/molt-gui",
+    "crates/molt-e2e",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+molt-core = { path = "crates/molt-core" }
+molt-safety = { path = "crates/molt-safety" }
+molt-scan = { path = "crates/molt-scan" }
+molt-act = { path = "crates/molt-act" }
+molt-rules = { path = "crates/molt-rules" }
+molt-ai = { path = "crates/molt-ai" }
+
+[profile.release]
+strip = true
+lto = "thin"

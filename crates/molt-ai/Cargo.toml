@@ -1,0 +1,22 @@
+[package]
+name = "molt-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+molt-core.workspace = true
+molt-safety.workspace = true
+molt-scan.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+# 只用同步 HTTP：这一层被 GUI 的后台线程调用，不需要 async 运行时；
+# 引入 tokio 会让二进制体积和依赖面都为一次请求翻倍。
+ureq = { version = "3", features = ["json"] }
+
+# 端到端示例要跑真实的执行/撤销链路，因此需要写盘层。
+# 只在示例与测试里用，不给库本身引入依赖。
+[dev-dependencies]
+molt-act.workspace = true
+

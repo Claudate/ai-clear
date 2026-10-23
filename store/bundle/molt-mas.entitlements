@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  上架 Mac App Store 用的 entitlements。上架版本一定是沙箱的，这是硬要求。
+
+  下面每一条都是「不给就跑不起来」或「给了才能读到家目录下的缓存」，不是抄模板：
+  收要读 ~/.claude、~/.codex、~/Library/Caches/<各工具>，沙箱默认一律读不到。
+
+  已知缺口（这就是 ai-clear-mas-distribution 里那条结论的来源）：
+  沙箱下 ~/.claude 这类「点目录」既不在 Documents/Downloads/Desktop 里，
+  也没有对应的静态 entitlement 可声明。可用的只有下面两条路：
+    1. home-relative-path.read-only + 用户首次授权（macOS 会弹「访问你的家目录」）；
+    2. security-scoped bookmarks：让用户手动选一次目录，程序存书签后续复用。
+  本文件给了第 1 条（覆盖面最大），第 2 条需要在代码里实现选目录与书签持久化，
+  属于上架前必须补的开发工作，不是配置能解决的。
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- 读缓存至少需要读权限；写只发生在隔离区内，而隔离区落在容器目录里。 -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!--
+      这条是收的核心能力：扫描范围就在家目录里（~/.claude、~/.codex、
+      ~/Library/Application Support/*）。没有它，沙箱版只能看到一个空清单。
+      macOS 会在首次访问时弹窗要求用户确认。
+    -->
+    <key>com.apple.security.files.home-relative-path.read-only</key>
+    <true/>
+
+    <!-- 用户可能在外部卷上放项目（target 目录）。 -->
+    <key>com.apple.security.files.downloads.read-only</key>
+    <true/>
+
+    <!-- AI 分析要访问用户配置的模型端点。 -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!--
+      定时清理（schedule install）在沙箱里必须走 SMAppService，
+      不能再用 launchd 直接写 LaunchAgents —— 后者在沙箱下会被拒。
+      entitlement 本身不需要额外键，但 Info.plist 里不能声明 LaunchAgent。
+    -->
+</dict>
+</plist>
