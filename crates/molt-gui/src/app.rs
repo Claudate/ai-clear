@@ -168,11 +168,15 @@ impl eframe::App for MoltApp {
     }
 }
 
-/// 顶部：品牌一行，菜单单独一行。
+/// 顶部：只有一行。品牌在左，活动状态与五个图标靠右。
 ///
-/// 菜单不再和品牌、活动状态挤在同一行——旧版那一行里同时有品牌、五个页签
-/// 和一个会变长的「正在扫描 12/48」，窗口一窄就互相压。拆成两行之后，
-/// 每个页签之间的间距可以真正拉开，字号放大到 1.4 档也不会贴在一起。
+/// 上一版是「品牌 + 副标题」一行、五个中文页签再一行，占掉两条栏高，
+/// 而首屏真正该先看到的是磁盘数字。现在压成一行：品牌留作身份，
+/// 导航换成图标，中文名走悬停提示——五个中文词一旦并排，就等于把
+/// 那条被撤掉的菜单又长回来了。
+///
+/// 图标比文字更依赖形状记忆，所以五个形状刻意选得互不相像（见 `NavIcon`），
+/// 并且每页正文顶部本来就有大标题，认错了也能立刻纠正。
 fn top_bar(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     egui::Panel::top("top")
         .resizable(false)
@@ -183,98 +187,41 @@ fn top_bar(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                 .inner_margin(egui::Margin::symmetric(28, 12)),
         )
         .show(ui, |ui| {
-            // ---- 第一行：品牌 + 右侧活动状态 ----
+            // ---- 唯一一行：品牌在左，活动状态与五个图标靠右 ----
+            //
+            // 图标在右、活动文字在它的左边：`right_to_left` 里先加的贴最右，
+            // 所以图标先加、活动文字后加。图标内部再倒序加一遍，视觉顺序才
+            // 还是「清理 → 临时空间 → 历史 → 自动清理 → 设置」。
             ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = p.sz(3.0);
-                    ui.label(
+                ui.add(
+                    egui::Label::new(
                         egui::RichText::new("净灵 · Cleanling")
                             .size(p.sz(17.0))
                             .strong(),
-                    );
-                    ui.label(
-                        egui::RichText::new("清掉能自己长回来的，留下该留的")
-                            .size(p.sz(10.5))
-                            .color(p.text_faint),
-                    );
-                });
-
+                    )
+                    .wrap_mode(egui::TextWrapMode::Extend),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for page in Page::ALL.iter().rev() {
+                        let badge = badge_for(state, *page);
+                        let resp = crate::widgets::nav_icon(
+                            ui,
+                            p,
+                            page.icon(),
+                            state.page == *page,
+                            badge.as_deref(),
+                        );
+                        // 中文名只在悬停时出现——把它写回这一行，就等于把菜单加回来了
+                        if resp.on_hover_text(page.title()).clicked() {
+                            go_page(state, *page);
+                        }
+                        ui.add_space(p.sz(4.0));
+                    }
+                    ui.add_space(p.sz(12.0));
                     activity_status(ui, state, p);
                 });
             });
-
-            ui.add_space(p.sz(12.0));
-
-            // ---- 第二行：菜单。左右各留 14 点内边距，项间距 6 点。----
-            egui::Frame::NONE
-                .fill(p.surface_alt.gamma_multiply(0.7))
-                .corner_radius(egui::CornerRadius::same(crate::theme::RADIUS_PILL))
-                .inner_margin(egui::Margin::symmetric(6, 5))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = p.sz(2.0);
-                        for page in Page::ALL {
-                            let selected = state.page == page;
-                            let label = match page {
-                                // 固定入口上带数量：用户不必切页就知道里面有没有东西
-                                Page::Quarantine => {
-                                    match state.quarantine.iter().filter(|r| r.restorable).count() {
-                                        0 => page.title().to_string(),
-                                        n => format!("{} {n}", page.title()),
-                                    }
-                                }
-                                Page::Automation if state.auto.config.enabled => {
-                                    format!("{} ·开", page.title())
-                                }
-                                // 历史会一直累积，页签上带数量，用户不必切页就知道有没有东西。
-                                Page::History if !state.history.is_empty() => {
-                                    format!("{} {}", page.title(), state.history.len())
-                                }
-                                _ => page.title().to_string(),
-                            };
-                            let text = egui::RichText::new(&label)
-                                .size(p.sz(13.0))
-                                .color(if selected { p.text } else { p.text_dim });
-                            // 宽度按文字实际宽度加内边距算，不写死：
-                            // 文案本身（「临时空间 3」「历史 12」）长短不一，
-                            // 固定宽度在字号 1.4 下会把长标签压成两行；
-                            // 而只给 0 宽度的按钮会让五个页签贴成「清理临时空间历史…」一串。
-                            let text_w = ui
-                                .painter()
-                                .layout_no_wrap(
-                                    label.clone(),
-                                    egui::FontId::proportional(p.sz(13.0)),
-                                    p.text,
-                                )
-                                .size()
-                                .x;
-                            let pad = p.sz(15.0);
-                            let mut btn = egui::Button::new(text)
-                                .frame(false)
-                                .corner_radius(egui::CornerRadius::same(crate::theme::RADIUS_PILL))
-                                .min_size(egui::vec2(text_w + pad * 2.0, p.sz(32.0)));
-                            if selected {
-                                btn = btn.fill(p.surface);
-                            }
-                            // 页签之间额外的呼吸量：只有这一处能加，多了就散
-                            ui.add_space(p.sz(2.0));
-                            if ui.add(btn).clicked() {
-                                state.page = page;
-                                match page {
-                                    Page::Quarantine => crate::pages::quarantine::reload(state),
-                                    Page::History => crate::pages::history::reload(state),
-                                    Page::Automation => {
-                                        state.auto.loaded = false;
-                                        crate::pages::automation::ensure_loaded(state);
-                                    }
-                                    Page::Settings => state.ai.reload_config(),
-                                    Page::Workbench => {}
-                                }
-                            }
-                        }
-                    });
-                });
 
             // 底部细线把顶栏和内容分开
             let r = ui.max_rect();
@@ -286,7 +233,42 @@ fn top_bar(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
         });
 }
 
-/// 居中弹窗：报错与提示从这里出去。
+/// 切页并做该页需要的加载。
+///
+/// 抽出来是为了让测试能走「点图标」这条真路径：副作用留在这里一份，
+/// 界面与测试就不会各理解一遍「切到临时空间要重读列表」。
+fn go_page(state: &mut AppState, page: Page) {
+    state.page = page;
+    match page {
+        Page::Quarantine => crate::pages::quarantine::reload(state),
+        Page::History => crate::pages::history::reload(state),
+        Page::Automation => {
+            state.auto.loaded = false;
+            crate::pages::automation::ensure_loaded(state);
+        }
+        Page::Settings => state.ai.reload_config(),
+        Page::Workbench => {}
+    }
+}
+
+/// 图标右上角的角标：有东西待处理时不必点进去就知道。
+///
+/// 空串表示「只画一个点」——定时清理开着是个状态，不是一个数量，
+/// 用数字反而会被读成「有 0 项」。
+fn badge_for(state: &AppState, page: Page) -> Option<String> {
+    match page {
+        Page::Quarantine => {
+            let n = state.quarantine.iter().filter(|r| r.restorable).count();
+            (n > 0).then(|| n.to_string())
+        }
+        Page::History => {
+            let n = state.history.len();
+            (n > 0).then(|| n.to_string())
+        }
+        Page::Automation if state.auto.config.enabled => Some(String::new()),
+        _ => None,
+    }
+}
 ///
 /// 底部状态条已经撤掉：它常驻、容易被忽略，字号小的用户根本不会看那个角落。
 /// 弹窗会打断操作，所以只用于两类事：**失败**与**刚落幕的一次动作**——
@@ -552,45 +534,328 @@ mod tests {
         );
     }
 
-    /// 菜单页签之间要有间隔，不能挤成一串。
+    /// 顶栏只剩一行：品牌在左，图标在右；中文菜单与副标题都不该再出现。
+    ///
+    /// 方案原本写的是「断言没有任何 `Page::title()` 出现在画面文字里」。
+    /// 按字面做不到：每页正文顶部都有 `page_header` 的大标题，首页正文写的
+    /// 正是「清理」。所以这里限定在**顶栏那一条高度带**里断言——菜单换成
+    /// 图标，要守的是「顶栏里不再有中文页名」，不是「全屏不能出现这四个字」。
     #[test]
-    fn tabs_are_spaced_out() {
+    fn nav_icons_sit_in_one_row_at_top_right() {
         let texts = paint(AppState::new("/Users/me".into()), 1120.0);
-        // 五个页签的标题
-        let mut xs: Vec<f32> = Vec::new();
-        for page in Page::ALL {
-            let title = page.title();
-            if let Some((_, pos)) = texts
-                .iter()
-                .find(|(t, _)| t == title || t.starts_with(title))
-            {
-                xs.push(pos.x);
-            }
-        }
-        assert_eq!(xs.len(), 5, "五个页签都要画出来：{texts:#?}");
-        // 页签文字宽约 30–60 点；间距不到 40 就会读成一串。
-        for w in xs.windows(2) {
-            let gap = w[1] - w[0];
-            assert!(
-                gap > 44.0,
-                "相邻页签的水平间隔太小（{gap}），会挤在一起：{xs:?}"
-            );
-        }
-        // 菜单必须自成一行：五个页签的 y 应当一致，且与品牌行分开。
-        let brand_y = texts
+
+        // 断言一：副标题已删。它原本是品牌名下面那行小字。
+        assert!(
+            !texts.iter().any(|(t, _)| t.contains("清掉能自己长回来")),
+            "副标题必须删掉：{texts:#?}"
+        );
+
+        // 断言三：品牌还在，并且在左半边。
+        let (_, brand) = texts
             .iter()
             .find(|(t, _)| t.contains("净灵"))
-            .map(|(_, p)| p.y)
-            .expect("要有品牌行");
-        let tab_y = texts
-            .iter()
-            .find(|(t, _)| t == "清理")
-            .map(|(_, p)| p.y)
-            .expect("要有菜单行");
+            .expect("品牌要留着");
+        assert!(brand.x < 1120.0 * 0.5, "品牌要在左边：x = {}", brand.x);
+
+        // 断言二：顶栏里没有任何中文页名。顶栏只有一行，高度是
+        // 上内边距 12 + 图标高 34×1.4 ≈ 60；取品牌基线往下 40 点作为这条带的下沿。
+        let bar_bottom = brand.y + 40.0;
+        for page in Page::ALL {
+            let title = page.title();
+            assert!(
+                !texts
+                    .iter()
+                    .any(|(t, pos)| t == title && pos.y < bar_bottom),
+                "「{title}」还画在顶栏里——菜单没换成图标：{texts:#?}"
+            );
+        }
+    }
+
+    /// 图标必须真的能点。只断言「画出来了」会漏掉「点了没反应」——
+    /// 而那一类问题在截图上完全看不出来。
+    #[test]
+    fn nav_icon_click_reports_hit() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        let p = crate::theme::Palette::light().with_scale(crate::theme::Theme::DEFAULT_SCALE);
+
+        // 第一帧只为拿到图标的矩形；第二帧往它中心送一次完整的按下 + 抬起。
+        let rect = std::rc::Rc::new(std::cell::Cell::new(egui::Rect::NOTHING));
+        let hit = std::rc::Rc::new(std::cell::Cell::new(false));
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 120.0),
+            )),
+            ..Default::default()
+        };
+
+        for frame in 0..3 {
+            if frame == 2 {
+                let c = rect.get().center();
+                let modifiers = egui::Modifiers::default();
+                input.events = vec![
+                    egui::Event::PointerMoved(c),
+                    egui::Event::PointerButton {
+                        pos: c,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers,
+                    },
+                    egui::Event::PointerButton {
+                        pos: c,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers,
+                    },
+                ];
+            }
+            let mut out = ctx.run_ui(input.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let resp = crate::widgets::nav_icon(ui, &p, Page::Settings.icon(), false, None);
+                    rect.set(resp.rect);
+                    if resp.clicked() {
+                        hit.set(true);
+                    }
+                });
+            });
+            out.textures_delta.clear();
+        }
+
         assert!(
-            tab_y - brand_y > 20.0,
-            "菜单要在品牌下面单独一行：品牌 {brand_y}，菜单 {tab_y}"
+            hit.get(),
+            "点图标中心必须算一次点击（rect = {:?}）",
+            rect.get()
         );
+    }
+
+    /// 点图标必须真的切页并触发该页的加载，而不是只改一个字段。
+    ///
+    /// 方案原本要求「断言 `Page::Automation` 会把 `auto.loaded` 置回 false」。
+    /// 按字面断言必挂：`go_page` 里紧跟着调 `ensure_loaded`，它读完配置
+    /// 又会把 `loaded` 置回 `true`——`false` 只是那一瞬间的中间态，从外面
+    /// 观察不到。所以改成能证明「重读真的发生了」的判据：先把内存里的配置
+    /// 塞一个磁盘上不可能有的标记，再进这一页；如果 `loaded = false` 那一步
+    /// 被删掉，`ensure_loaded` 会立刻 early-return，标记就会留在内存里。
+    #[test]
+    fn go_page_switches_and_reloads() {
+        let mut state = AppState::new("/Users/me".into());
+        for page in Page::ALL {
+            go_page(&mut state, page);
+            assert_eq!(state.page, page, "切到 {page:?} 之后 page 必须跟着变");
+        }
+
+        // 一个绝不会出现在任何真实配置里的规则 id
+        const SENTINEL: &str = "__go_page_reload_probe__";
+        state.auto.config.rule_ids = vec![SENTINEL.to_string()];
+        state.auto.loaded = true; // 内存里这份「已经读过」——不重置就会直接复用
+        state.auto.draft = None;
+
+        go_page(&mut state, Page::Automation);
+
+        assert!(
+            !state.auto.config.rule_ids.iter().any(|r| r == SENTINEL),
+            "进自动清理页必须重读配置；标记还在，说明 loaded=false 那一步丢了"
+        );
+        assert!(state.auto.loaded, "重读跑完之后 loaded 应回到 true");
+        assert!(
+            state.auto.draft.is_some(),
+            "重读配置后要重建草稿，否则界面还在编辑上一份"
+        );
+    }
+
+    /// 角标：有东西才有数字，定时开着只有点。
+    #[test]
+    fn badges_only_show_when_there_is_something() {
+        let mut state = AppState::new("/Users/me".into());
+        assert_eq!(badge_for(&state, Page::Quarantine), None);
+        assert_eq!(badge_for(&state, Page::History), None);
+        assert_eq!(badge_for(&state, Page::Automation), None);
+        assert_eq!(badge_for(&state, Page::Workbench), None);
+
+        state.history = vec![crate::state::HistoryRow {
+            id: 1,
+            path: "~/.npm/_cacache".into(),
+            bytes: 1,
+            at: "2026-10-23T03:00:12Z".into(),
+            source: molt_act::CleanSource::Manual,
+            action: crate::state::HistoryAction::Quarantined,
+        }];
+        assert_eq!(badge_for(&state, Page::History).as_deref(), Some("1"));
+
+        state.auto.config.enabled = true;
+        assert_eq!(
+            badge_for(&state, Page::Automation).as_deref(),
+            Some(""),
+            "定时开着是状态不是数量，只画点"
+        );
+    }
+
+    /// 端到端：往真实的 `MoltApp::draw` 里注入指针事件，逐个点顶栏图标，
+    /// 看真的切到哪一页。
+    ///
+    /// 这条替代「肉眼看截图」：图标画出来了、位置对不对、点了有没有反应，
+    /// 三件事只有在真布局 + 真事件里才同时成立。扫描顶栏一条横线，
+    /// 记录每个 x 点下去落到哪一页，再由落点还原出五个可点区间。
+    #[test]
+    fn clicking_each_icon_switches_to_its_page() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        let w = 1120.0_f32;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, 1600.0));
+        let mut app = MoltApp::headless(
+            &ctx,
+            crate::theme::Mode::Light,
+            AppState::new("/Users/me".into()),
+        );
+        // 顶栏图标垂直居中：上内边距 12 + 图标高的一半
+        let y = 12.0 + crate::theme::Palette::light().sz(34.0) / 2.0;
+
+        let base = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        // 第一帧定布局
+        run_frame(&ctx, &mut app, base.clone());
+
+        // 起点用「设置」而不是「清理」：这样点清理图标也会产生可见变化，
+        // 否则「点了没反应」和「本来就是这一页」分不开。
+        //
+        // 但任何单一起点都会让**那一页自己的图标**测不出来（点了页面不变）。
+        // 所以扫两遍，起点分别是两个不同的页，两遍互补；同一个 x 至少一遍
+        // 能给出答案。
+        let mut known: std::collections::BTreeMap<i32, Page> = std::collections::BTreeMap::new();
+        for start in [Page::Settings, Page::Workbench] {
+            let mut x = 780.0_f32;
+            while x < w - 20.0 {
+                app.state.page = start;
+                let pos = egui::Pos2::new(x, y);
+                let mut down = base.clone();
+                down.events = vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ];
+                run_frame(&ctx, &mut app, down);
+                let mut up = base.clone();
+                up.events = vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                }];
+                run_frame(&ctx, &mut app, up);
+                if app.state.page != start {
+                    known.insert((x * 10.0) as i32, app.state.page);
+                }
+                x += 4.0;
+            }
+        }
+
+        // 把相邻且落到同一页的采样点合并成一段可点区间
+        let mut bands: Vec<(f32, f32, Page)> = Vec::new();
+        for (kx, page) in known {
+            let x = kx as f32 / 10.0;
+            match bands.last_mut() {
+                Some((_, hi, p)) if *p == page && x - *hi <= 4.5 => *hi = x,
+                _ => bands.push((x, x, page)),
+            }
+        }
+
+        assert_eq!(
+            bands.len(),
+            5,
+            "顶栏要能点出五个互不重叠的图标，实际 {:?}",
+            bands
+        );
+        // 视觉顺序必须还是 清理 → 临时空间 → 历史 → 自动清理 → 设置
+        let order: Vec<Page> = bands.iter().map(|(_, _, p)| *p).collect();
+        assert_eq!(order, Page::ALL.to_vec(), "图标顺序不对：{bands:?}");
+
+        for (lo, hi, page) in &bands {
+            assert!(
+                hi - lo + 4.0 >= 34.0,
+                "{page:?} 的可点区域只有 {} 点，低于 34 点的下限",
+                hi - lo + 4.0
+            );
+        }
+
+        // 五个图标都在右半边，且最右那个贴着右边距（28 点内边距）
+        let (first, _, _) = bands[0];
+        let (_, last_hi, last_page) = *bands.last().unwrap();
+        assert_eq!(last_page, Page::Settings, "最右一个该是「设置」");
+        assert!(first > w * 0.5, "图标要排到右半边：最左 {first}");
+        assert!(
+            (w - 28.0 - last_hi).abs() < 8.0,
+            "最右的图标要贴住右边距：可点区右边缘 {last_hi}，应为 {}",
+            w - 28.0
+        );
+
+        // 品牌在左半边，图标在右——中间不能有重叠
+        assert!(first > 300.0, "图标不该压到品牌名上：最左 {first}");
+    }
+
+    /// 悬停要弹出中文名：图标替代了文字，认页全靠它。
+    #[test]
+    fn hovering_an_icon_shows_its_chinese_name() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        // 提示气泡默认有 0.5 秒延迟，测试里调到 0，否则要等半秒。
+        // 必须放在 `headless` 之后：它会重装整套样式，之前改的会被覆盖。
+        ctx.all_styles_mut(|s| s.interaction.tooltip_delay = 0.0);
+        let w = 1120.0_f32;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, 1600.0));
+        let mut app = MoltApp::headless(
+            &ctx,
+            crate::theme::Mode::Light,
+            AppState::new("/Users/me".into()),
+        );
+        ctx.all_styles_mut(|s| s.interaction.tooltip_delay = 0.0);
+        let y = 12.0 + crate::theme::Palette::light().sz(34.0) / 2.0;
+        let base = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        run_frame(&ctx, &mut app, base.clone());
+
+        // 最右那个图标是「设置」：从右边距 28 + 半宽 23.8 处往里点
+        let x = w - 28.0 - 47.6 / 2.0;
+        let pos = egui::Pos2::new(x, y);
+        let mut texts = Vec::new();
+        for i in 0..4 {
+            let mut raw = base.clone();
+            raw.time = Some(i as f64 * 0.2);
+            raw.events = vec![egui::Event::PointerMoved(pos)];
+            texts = run_frame(&ctx, &mut app, raw);
+        }
+        assert!(
+            texts.iter().any(|(t, _)| t == "设置"),
+            "悬停设置图标要弹出中文名：{texts:#?}"
+        );
+    }
+
+    /// 跑一帧真实的窗口，返回这一帧画出来的文字与坐标。
+    fn run_frame(
+        ctx: &egui::Context,
+        app: &mut MoltApp,
+        raw: egui::RawInput,
+    ) -> Vec<(String, egui::Pos2)> {
+        let mut texts = Vec::new();
+        let mut out = ctx.run_ui(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.draw(ui));
+        });
+        out.textures_delta.clear();
+        for cs in &out.shapes {
+            walk(&cs.shape, &mut texts);
+        }
+        texts
     }
 
     /// 报错必须弹出来，而不是在底部留一行小字。

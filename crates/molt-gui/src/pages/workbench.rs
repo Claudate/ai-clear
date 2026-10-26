@@ -119,8 +119,8 @@ fn header(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
 
 /// 首页主体：一块盘的仪表盘。
 ///
-/// 排法参照 360 那类「一眼看懂」的做法：一个环，环心写还剩多少，旁边是
-/// 三色图例与一个满宽大按钮。打开这一页要能同时得到三件事——盘还剩多少、
+/// 排法参照 360 那类「一眼看懂」的做法：一个环，环心写还剩多少，环正下方是
+/// 一行居中的三色图例与一个满宽大按钮。打开这一页要能同时得到三件事——盘还剩多少、
 /// 能腾多少、下一步点哪——而且都不需要读完一句话。
 ///
 /// 磁盘读数不依赖扫描（`state.disk` 每帧都有），所以第一帧就有画面，
@@ -365,33 +365,45 @@ fn dashboard_side(
         _ => None,
     };
 
-    let mut go_list = false;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = p.sz(18.0);
-        let clean_value = if state.result.is_none() {
-            "—".to_string()
-        } else {
-            molt_scan::human_bytes(clean_bytes)
-        };
-        if legend(ui, p, p.reclaimable, "可清理", &clean_value) && state.result.is_some() {
-            go_list = true;
-        }
-        if let Some((used, available)) = disk {
-            legend_readonly(ui, p, p.used_bar, "已用", &molt_scan::human_bytes(used));
-            legend_readonly(
-                ui,
-                p,
-                p.border_strong,
-                "可用",
-                &molt_scan::human_bytes(available),
-            );
-        }
-    });
-    if go_list {
+    // 图例：环正下方一行，整行水平居中，永不折行。
+    //
+    // 为什么不能直接 `ui.horizontal_wrapped` 或再套一层 `vertical_centered`：
+    // `horizontal` 的 frame 会吃掉整条可用宽度（`available_size_before_wrap`），
+    // 于是「把这一行居中」等于「把一条满宽的框居中」，视觉上没有位移；
+    // 而 `Layout::left_to_right` 的 x 对齐在 egui 内部被强制成 `Align::LEFT`，
+    // 套 `vertical_centered` 也改不动它。唯一可靠的做法是先量出这一行真实的
+    // 宽度，再向父级申请**正好这么宽**的一块，由父级的十字轴居中。
+    let clean_value = if state.result.is_none() {
+        "—".to_string()
+    } else {
+        molt_scan::human_bytes(clean_bytes)
+    };
+    let mut cells: Vec<LegendCell> = vec![LegendCell {
+        color: p.reclaimable,
+        label: "可清理".to_string(),
+        value: clean_value,
+        clickable: state.result.is_some(),
+    }];
+    if let Some((used, available)) = disk {
+        cells.push(LegendCell {
+            color: p.used_bar,
+            label: "已用".to_string(),
+            value: molt_scan::human_bytes(used),
+            clickable: false,
+        });
+        cells.push(LegendCell {
+            color: p.border_strong,
+            label: "可用".to_string(),
+            value: molt_scan::human_bytes(available),
+            clickable: false,
+        });
+    }
+    if legend_row(ui, p, &cells).is_some() {
         state.filter = Filter::Cleanable;
         state.list_expanded = true;
         state.scroll_to_list = true;
     }
+
 
     ui.add_space(p.sz(14.0));
 
@@ -481,10 +493,81 @@ fn dashboard_side(
     }
 }
 
+/// 图例里的一格。先收集再排版，是因为整行要居中就得先知道整行多宽。
+struct LegendCell {
+    color: egui::Color32,
+    label: String,
+    value: String,
+    /// 可点的只有「可清理」：点它等于说「我要看这些条目」。
+    clickable: bool,
+}
+
+/// 图例一行：环正下方，整行水平居中，永不折行。
+///
+/// 为什么不用 `ui.horizontal_wrapped`：它在窄窗口里会把「已用 / 可用」折到
+/// 第二行，用户读到的是两行等宽的数字，反而比一行更难比大小。也不套
+/// `vertical_centered`——`horizontal` 的 frame 会吃掉整条可用宽度，
+/// 把一条满宽的框居中，视觉上没有任何位移。
+///
+/// 所以分两步：先按真实字体量出每格宽度（`layout_no_wrap`），算出整行宽度，
+/// 再向父级申请**正好这么宽**的一块，由父级的十字轴居中。量宽和画图必须
+/// 用同一份字符串、同一个字号，否则会出现「量的时候是 `—`、画的时候是 `19.0 GB`」
+/// 的错位，整行就会偏。
+///
+/// 返回被点中的格序号。
+fn legend_row(ui: &mut egui::Ui, p: &Palette, cells: &[LegendCell]) -> Option<usize> {
+    if cells.is_empty() {
+        return None;
+    }
+
+    let gap = p.sz(18.0);
+    let inner_gap = p.sz(5.0);
+    let label_font = egui::FontId::proportional(p.sz(11.5));
+    let value_font = egui::FontId::proportional(p.sz(15.0));
+    // `ui.fonts` 只给不可变借用，而排版要可变；painter 的克隆能拿同一套字体。
+    let painter = ui.painter().clone();
+    let dot = crate::widgets::dot_size();
+
+    let mut total_w = gap * (cells.len() as f32 - 1.0);
+    let mut row_h: f32 = dot;
+    for c in cells {
+        let lw = painter
+            .layout_no_wrap(c.label.clone(), label_font.clone(), p.text_dim)
+            .size();
+        let vw = painter
+            .layout_no_wrap(c.value.clone(), value_font.clone(), p.text)
+            .size();
+        total_w += dot + inner_gap + lw.x + inner_gap + vw.x;
+        row_h = row_h.max(lw.y).max(vw.y);
+    }
+
+    let mut clicked = None;
+    ui.vertical_centered(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(total_w, row_h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for (i, c) in cells.iter().enumerate() {
+                    let hit = if c.clickable {
+                        legend(ui, p, c.color, &c.label, &c.value)
+                    } else {
+                        legend_readonly(ui, p, c.color, &c.label, &c.value);
+                        false
+                    };
+                    if hit {
+                        clicked = Some(i);
+                    }
+                }
+            },
+        );
+    });
+    clicked
+}
+
 /// 图例一格（可点）。返回是否被点中。
 ///
-/// 图例放在环旁边而不是贴着弧线做指引线：指引线在窄窗口里会互相压住，
-/// 图例换行只是多占一行，永远读得清。
+/// 图例放在环下方而不是贴着弧线做指引线：指引线在窄窗口里会互相压住。
 fn legend(ui: &mut egui::Ui, p: &Palette, color: egui::Color32, label: &str, value: &str) -> bool {
     let resp = ui.horizontal(|ui| legend_body(ui, p, color, label, value));
     let hit = resp.response.interact(egui::Sense::click());
@@ -1859,6 +1942,114 @@ mod tests {
             legend_y < button_y,
             "图例要在按钮上面：图例 {legend_y}，按钮 {button_y}"
         );
+    }
+
+    /// 图例必须一行、居中、不折行——两种窗口宽度下都要成立。
+    ///
+    /// 用画出来的矩形验，而不是靠看图：折行与偏移在缩略图上都不明显，
+    /// 但用户一眼就能看出「这一行歪了」。1120 是默认窗口，760 是窄窗口
+    /// （`shots.rs` 里 `18-narrow-workbench` 用的就是 760×640）。
+    #[test]
+    fn legend_is_one_line_and_centered() {
+        for w in [1120.0_f32, 760.0] {
+            let ctx = egui::Context::default();
+            crate::theme::install_fonts(&ctx);
+            crate::theme::Theme::install(&ctx);
+            let mut state = state_with_notes();
+            // 有磁盘读数才会画出「已用 / 可用」两格，三格才谈得上「一行」
+            state.disk = Some(Ok(molt_scan::disk::DiskUsage {
+                total: 500 << 30,
+                used: 320 << 30,
+                available: 180 << 30,
+            }));
+
+            let mut rects = Vec::new();
+            for _ in 0..2 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(w, 900.0),
+                    )),
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(raw, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        show(ui, &mut state, &Palette::light());
+                    });
+                });
+                out.textures_delta.clear();
+                rects.clear();
+                collect_text_rects(&out.shapes, &mut rects);
+            }
+
+            let find = |needle: &str| -> egui::Rect {
+                rects
+                    .iter()
+                    .find(|(t, _)| t == needle)
+                    .map(|(_, r)| *r)
+                    .unwrap_or_else(|| panic!("{w} 宽时找不到「{needle}」：{rects:#?}"))
+            };
+            let clean = find("可清理");
+            let used = find("已用");
+            let avail = find("可用");
+
+            // 断言一：三格在同一条基线上
+            let ys = [clean.center().y, used.center().y, avail.center().y];
+            let (lo, hi) = (
+                ys.iter().cloned().fold(f32::MAX, f32::min),
+                ys.iter().cloned().fold(f32::MIN, f32::max),
+            );
+            assert!(
+                hi - lo < 1.0,
+                "{w} 宽时三格不在同一行（y 差 {}）：{ys:?}",
+                hi - lo
+            );
+
+            // 断言二：整行居中。取与这三格同一条基线的全部文字（含色点旁的
+            // 数字），左右边界的中点应当落在内容区中心。
+            // 卡片左右内边距各 18，而 CentralPanel 的内容区中心正好是 W/2。
+            let base = clean.center().y;
+            let band: Vec<&egui::Rect> = rects
+                .iter()
+                .filter(|(_, r)| (r.center().y - base).abs() < 10.0)
+                .map(|(_, r)| r)
+                .collect();
+            let left = band.iter().map(|r| r.left()).fold(f32::MAX, f32::min);
+            let right = band.iter().map(|r| r.right()).fold(f32::MIN, f32::max);
+            let mid = (left + right) / 2.0;
+            assert!(
+                (mid - w / 2.0).abs() < 8.0,
+                "{w} 宽时图例没居中：行中点 {mid}，应为 {}（left {left}, right {right}）",
+                w / 2.0
+            );
+        }
+    }
+
+    fn collect_text_rects(
+        shapes: &[egui::epaint::ClippedShape],
+        out: &mut Vec<(String, egui::Rect)>,
+    ) {
+        for cs in shapes {
+            walk_text_rect(&cs.shape, out);
+        }
+    }
+
+    fn walk_text_rect(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::epaint::Shape::Text(t) => {
+                let size = t.galley.size();
+                out.push((
+                    t.galley.text().to_string(),
+                    egui::Rect::from_min_size(t.pos, size),
+                ));
+            }
+            egui::epaint::Shape::Vec(v) => {
+                for s in v {
+                    walk_text_rect(s, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn collect_text_pos(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<(String, f32)>) {

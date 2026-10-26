@@ -772,9 +772,149 @@ pub fn hero_button(ui: &mut egui::Ui, p: &Palette, text: &str, width: f32, enabl
 
 /// 判定色点。比文字更省地方，也比图标更不容易误读。
 pub fn dot(ui: &mut egui::Ui, color: egui::Color32) {
-    let d = p_dot();
+    let d = dot_size();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), d / 2.0, color);
+}
+
+/// 顶栏导航的图标。五个页签各一个，形状互不相似。
+///
+/// 为什么自绘而不是用字符或位图：默认字体缺 `⚙`、`⏱` 这类字形时会画成
+/// 豆腐块，而且随系统字体变；位图则要为深浅两套配色、还要为 Retina 各准备
+/// 一份。自绘的坐标与线宽都乘 `p.scale`，跟着大字号一起长大，颜色直接取调色板。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavIcon {
+    /// 仪表盘：清理（首页那颗圆环的缩影）
+    Gauge,
+    /// 收纳箱：临时空间
+    Archive,
+    /// 时钟：历史
+    Clock,
+    /// 日历：自动清理
+    Calendar,
+    /// 齿轮：设置
+    Gear,
+}
+
+/// 一个顶栏图标按钮：药丸底 + 图形 + 可选角标。
+///
+/// 返回 `Response`，调用方据此挂 tooltip 与点击。中文名不写在这一行里——
+/// 五个中文词并排会重新长成那条被撤掉的菜单。
+pub fn nav_icon(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    icon: NavIcon,
+    selected: bool,
+    badge: Option<&str>,
+) -> egui::Response {
+    let side = p.sz(34.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    let color = if selected { p.reclaimable } else { p.text_dim };
+    if selected {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(RADIUS_CONTROL), p.accent_soft);
+    } else if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(RADIUS_CONTROL), p.surface_hover);
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    draw_nav_icon(ui.painter(), p, icon, rect.center(), color);
+
+    // 角标：有东西 / 某个开关开着，不点进去也看得见。
+    // 空串表示「只画一个点」——定时清理开着是个状态，不是一个数量。
+    if let Some(b) = badge {
+        let c = rect.right_top() + egui::vec2(-p.sz(2.0), p.sz(2.0));
+        if b.is_empty() {
+            ui.painter().circle_filled(c, p.sz(3.0), p.reclaimable);
+        } else {
+            // 先垫一圈底色：角标会压在药丸描边和图形上，不垫就读不清
+            ui.painter()
+                .circle_filled(c, p.sz(8.5), p.surface);
+            ui.painter().circle_filled(c, p.sz(7.0), p.reclaimable);
+            ui.painter().text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                b,
+                egui::FontId::proportional(p.sz(9.0)),
+                p.on_accent(),
+            );
+        }
+    }
+    resp
+}
+
+/// 图形本体。统一在一只 20×20 的方框里画，方框中心对齐 `center`。
+fn draw_nav_icon(
+    painter: &egui::Painter,
+    p: &Palette,
+    icon: NavIcon,
+    center: egui::Pos2,
+    color: egui::Color32,
+) {
+    let k = p.scale;
+    // (0,0) 是 20×20 方框的左上角，(10,10) 是中心——下面所有坐标按这个格子写
+    let at = |x: f32, y: f32| center + egui::vec2((x - 10.0) * k, (y - 10.0) * k);
+    let stroke = egui::Stroke::new(p.sz(1.6), color);
+    let r = |v: f32| v * k;
+    let boxed = |x0: f32, y0: f32, x1: f32, y1: f32, radius: f32| {
+        painter.rect_stroke(
+            egui::Rect::from_min_max(at(x0, y0), at(x1, y1)),
+            egui::CornerRadius::same((radius * k) as u8),
+            stroke,
+            egui::StrokeKind::Inside,
+        )
+    };
+
+    match icon {
+        NavIcon::Gauge => {
+            // 240° 的缺口弧：150° 起、顺时针扫到 30°。钟表读法，0° 在 12 点。
+            // 缺口朝下，和齿轮那种闭合圆一眼就分得开。
+            let pts: Vec<egui::Pos2> = (0..=24)
+                .map(|i| {
+                    let deg = 150.0 + 240.0 * (i as f32 / 24.0);
+                    let (s, c) = (deg.to_radians().sin(), deg.to_radians().cos());
+                    center + egui::vec2(s * r(7.6), -c * r(7.6))
+                })
+                .collect();
+            painter.add(egui::Shape::line(pts, stroke));
+            let (s, c) = (45.0f32.to_radians().sin(), 45.0f32.to_radians().cos());
+            painter.line_segment(
+                [center, center + egui::vec2(s * r(4.6), -c * r(4.6))],
+                stroke,
+            );
+            painter.circle_filled(center, r(1.3), color);
+        }
+        NavIcon::Archive => {
+            boxed(2.0, 7.0, 18.0, 17.0, 2.0);
+            // 箱盖缝：一条横线，让「箱体」与「盖子」分开
+            painter.line_segment([at(2.0, 7.0), at(18.0, 7.0)], stroke);
+            boxed(7.0, 4.0, 13.0, 7.0, 1.5);
+        }
+        NavIcon::Clock => {
+            painter.circle_stroke(center, r(7.6), stroke);
+            painter.line_segment([center, at(10.0, 4.6)], stroke);
+            painter.line_segment([center, at(14.2, 10.0)], stroke);
+        }
+        NavIcon::Calendar => {
+            boxed(2.0, 5.0, 18.0, 17.0, 2.0);
+            // 表头线：日历和「一个方框」的差别全靠这一条
+            painter.line_segment([at(2.0, 9.0), at(18.0, 9.0)], stroke);
+            painter.line_segment([at(6.5, 2.5), at(6.5, 6.0)], stroke);
+            painter.line_segment([at(13.5, 2.5), at(13.5, 6.0)], stroke);
+        }
+        NavIcon::Gear => {
+            painter.circle_stroke(center, r(3.4), stroke);
+            // 八根外刺：闭合小圆 + 外刺，和仪表盘那道缺口弧轮廓差别很大
+            for i in 0..8 {
+                let deg = i as f32 * 45.0;
+                let (s, c) = (deg.to_radians().sin(), deg.to_radians().cos());
+                let dir = egui::vec2(s, -c);
+                painter.line_segment([center + dir * r(5.0), center + dir * r(7.6)], stroke);
+            }
+        }
+    }
 }
 
 /// 一段清单前的分节标题：左边一句「这是什么档」，右边数量与体积。
@@ -839,7 +979,12 @@ pub fn ai_note(ui: &mut egui::Ui, p: &Palette, text: &str) {
     });
 }
 
-fn p_dot() -> f32 {
+/// 判定色点的直径。**未乘缩放**——这是设计尺寸，画的时候由 `dot` 直接用。
+///
+/// 公开出去是为了让需要「先量宽、再决定排版」的调用方（首页图例那一行）
+/// 能算出这一格的真实宽度；那里量宽和画图必须用同一个数，
+/// 量的时候乘 `p.sz()`、画的时候不乘，排出来就会错位。
+pub fn dot_size() -> f32 {
     7.0
 }
 

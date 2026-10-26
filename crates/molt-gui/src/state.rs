@@ -41,6 +41,18 @@ impl Page {
         }
     }
 
+    /// 顶栏图标。中文名只在悬停时出现，所以形状必须能独立认出来。
+    pub fn icon(self) -> crate::widgets::NavIcon {
+        use crate::widgets::NavIcon;
+        match self {
+            Page::Workbench => NavIcon::Gauge,
+            Page::Quarantine => NavIcon::Archive,
+            Page::History => NavIcon::Clock,
+            Page::Automation => NavIcon::Calendar,
+            Page::Settings => NavIcon::Gear,
+        }
+    }
+
     pub const ALL: [Page; 5] = [
         Page::Workbench,
         Page::Quarantine,
