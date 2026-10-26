@@ -34,7 +34,7 @@ impl Page {
     pub fn title(self) -> &'static str {
         match self {
             Page::Workbench => "清理",
-            Page::Quarantine => "隔离区",
+            Page::Quarantine => "临时空间",
             Page::History => "历史",
             Page::Automation => "自动清理",
             Page::Settings => "设置",
@@ -103,6 +103,8 @@ impl Activity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Filter {
     All,
+    /// 「现在就能清」：建议清理 + 可回收。首页只露这一档时最常用的一种看法。
+    Cleanable,
     /// 建议优先处理：有代价但久未使用，或 AI 判定可以动
     Suggested,
     Reclaimable,
@@ -129,10 +131,10 @@ pub enum Priority {
 impl Priority {
     pub fn label(self) -> &'static str {
         match self {
-            Priority::Suggested => "建议清理",
-            Priority::Safe => "可以安全清理",
-            Priority::Costly => "要你确认",
-            Priority::Keep => "建议保留",
+            Priority::Suggested => "建议清掉",
+            Priority::Safe => "可以直接清",
+            Priority::Costly => "清之前先确认",
+            Priority::Keep => "建议留着",
         }
     }
 
@@ -173,7 +175,7 @@ pub enum HistoryAction {
 impl HistoryAction {
     pub fn label(self) -> &'static str {
         match self {
-            HistoryAction::Quarantined => "移入隔离区",
+            HistoryAction::Quarantined => "放入临时空间",
             HistoryAction::Restored => "已还原",
             HistoryAction::Purged => "彻底删除",
             HistoryAction::Deleted => "直接清理",
@@ -248,8 +250,6 @@ pub struct AiPanel {
     pub notes: HashMap<String, String>,
     /// 扫描时的绝对路径 → AI 是否认为可以动手
     pub safe: HashMap<String, bool>,
-    /// 设置页里展开的服务 id（点「详情」看完整配置）
-    pub inspect: Option<String>,
 }
 
 impl Default for AiPanel {
@@ -265,7 +265,6 @@ impl Default for AiPanel {
             last_at: None,
             notes: HashMap::new(),
             safe: HashMap::new(),
-            inspect: None,
         }
     }
 }
@@ -302,14 +301,13 @@ impl AiPanel {
     pub fn has_notes(&self) -> bool {
         !self.notes.is_empty()
     }
-
-    /// jev 那一家的完整配置。设置页要能查到并完整展示它。
-    pub fn jev(&self) -> Option<&molt_ai::Provider> {
-        self.config.provider(molt_ai::config::JEV_PROVIDER_ID)
-    }
 }
 
 /// 一次操作的结果。所有页面共用同一份展示。
+///
+/// 除了「做成了什么」，还记着「接下来去哪」——见 [`NextStep`]。
+/// 结果条如果只写「已移入隔离区 12 项」就断了，用户得自己想「那我去哪看」；
+/// 按钮文案与目标页由产出报告的那一方决定，因为它知道这次到底做成了什么。
 #[derive(Debug, Clone)]
 pub struct OpReport {
     /// 一句话结论，如「已永久删除 12 项，释放 1.2 GB」
@@ -319,6 +317,58 @@ pub struct OpReport {
     /// 逐项失败原因：(显示用路径, 原因)
     pub failures: Vec<(String, String)>,
     pub kind: StatusKind,
+    /// 接着做的那一步。`None` 表示这次没有明确的后续动作。
+    pub next: Option<NextStep>,
+}
+
+/// 一次操作之后，用户最可能想接着做的那一件事。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextStep {
+    /// 去隔离区看看刚移走的东西
+    Quarantine,
+    /// 去历史看这次永久删除的记录
+    History,
+    /// 重试失败的那些（回到清单重新扫描）
+    Retry,
+}
+
+impl NextStep {
+    pub fn label(self) -> &'static str {
+        match self {
+            NextStep::Quarantine => "去临时空间",
+            NextStep::History => "看历史",
+            NextStep::Retry => "重新扫描",
+        }
+    }
+}
+
+/// 历史页的筛选：三种「这一页最常被用来查的事」。
+///
+/// 不按每个 `HistoryAction` 各给一档：「彻底删除」与「直接清理」对用户是
+/// 同一件事（永久没了），分成两档只会让两边的数字都变小、看不出总量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistoryFilter {
+    #[default]
+    All,
+    /// 移入隔离区（还可能拿回来）
+    Quarantined,
+    /// 永久删除（隔离区彻底删除 + 直接清理）
+    Gone,
+    /// 还原
+    Restored,
+}
+
+impl HistoryFilter {
+    pub fn keeps(self, action: HistoryAction) -> bool {
+        match self {
+            HistoryFilter::All => true,
+            HistoryFilter::Quarantined => action == HistoryAction::Quarantined,
+            HistoryFilter::Gone => {
+                matches!(action, HistoryAction::Purged | HistoryAction::Deleted)
+            }
+            HistoryFilter::Restored => action == HistoryAction::Restored,
+        }
+    }
 }
 
 pub struct AppState {
@@ -339,33 +389,81 @@ pub struct AppState {
     pub quarantine_checked: HashSet<i64>,
     pub history: Vec<HistoryRow>,
     pub history_error: Option<String>,
+    pub history_filter: HistoryFilter,
     pub status: Option<StatusMessage>,
     pub restoring: Option<i64>,
     pub rules: Option<molt_core::RuleSet>,
+    /// 设置页的「高级」是否展开。默认收起：base_url / 环境变量名不是
+    /// 每次都要看的东西，但排障时必须能拿到。
+    pub settings_advanced: bool,
+    /// 设置页里正在输入的密钥。**只存在内存里**，保存后立即清空——
+    /// 它绝不能跟着窗口状态被持久化，也不能被回填进输入框。
+    pub key_draft: String,
     pub home: String,
     pub error: Option<String>,
+    /// 上一次**成功**扫描结束的时刻（`HH:MM`）。重扫失败时用它告诉用户
+    /// 「下面这份结果是什么时候的」——否则旧数字会被当成刚扫出来的。
+    pub last_scan_at: Option<String>,
     pub disk: Option<Result<molt_scan::disk::DiskUsage, String>>,
     pub session_freed: u64,
     pub last_op: Option<Arc<OpReport>>,
     pub pending_clean: Option<PendingClean>,
     pub pending_purge: Option<PendingPurge>,
-    /// 「建议保留」那一段是否展开
-    pub show_kept: bool,
-    pub request_scale_toggle: bool,
+    /// 清单是否已展开到全部。首页默认只露前几项，
+    /// 否则一屏全被清单吃掉，结论区和主按钮就被挤到看不见。
+    pub list_expanded: bool,
+    /// 下一帧是否把滚动条移到清单开头（用户点了「看看清单」）
+    pub scroll_to_list: bool,
     /// 定时任务页的状态
     pub auto: AutoPanel,
+    /// 首页圆环在清理中的动画进度（0..1）。清理结束时不再推进，
+    /// 下一次开始清理时清零——它只服务「一眼看到正在清」这一件事。
+    pub clean_anim: f32,
+    /// 本次清理的总项数与总字节，用于圆环圆心与说明文字。
+    pub clean_total_items: usize,
+    pub clean_total_bytes: u64,
+    /// 刚清完的庆祝态剩余秒数：>0 时圆环满绿并写「清理完成」，
+    /// 倒数完毕就回到磁盘读数。它让「清掉了」这件事自己看得见。
+    pub clean_done_secs: f32,
+    /// 上一帧是否在清理。用来区分「清理被中断」与「动画只是被别人摆好了」：
+    /// 前者要把弧收回去，后者（出图工具、预览）不该被抹掉。
+    pub clean_was_running: bool,
+    /// 刚结束的这一批是「直接清理」还是「放入临时空间」。
+    /// 两者在环心不能写同一句话：放进临时空间并没有释放空间，
+    /// 写「已腾出」就是在骗人。
+    pub clean_was_delete: bool,
 }
 
 /// 自动化页的状态。
 #[derive(Default)]
 pub struct AutoPanel {
+    /// 已经落盘、正在生效的那份配置。
     pub config: crate::schedule::ScheduleConfig,
+    /// 正在编辑的草稿。为空表示还没载入过。
+    ///
+    /// 界面上的改动只写进草稿，点「保存」才落盘——否则用户拨一下时间就
+    /// 立刻改了 launchd 里的任务，而他可能只是路过看看。
+    pub draft: Option<crate::schedule::ScheduleConfig>,
     pub loaded: bool,
     pub error: Option<String>,
     pub last_run: Option<crate::schedule::LastRun>,
     /// launchd 里现在是否真的加载着。`None` 表示还没查。
     pub installed: Option<bool>,
+    /// 正在写配置 / 装载 launchd。期间按钮置灰，防止重复点。
     pub saving: bool,
+}
+
+impl AutoPanel {
+    /// 草稿与生效配置是否不同。派生而不是另存一个 `dirty` 字段：
+    /// 两个字段迟早会不一致，而这里算一次是 O(几个字段)。
+    pub fn dirty(&self) -> bool {
+        self.draft.as_ref().is_some_and(|d| *d != self.config)
+    }
+
+    /// 草稿（没有草稿时退回生效配置），供只读展示使用。
+    pub fn editing(&self) -> &crate::schedule::ScheduleConfig {
+        self.draft.as_ref().unwrap_or(&self.config)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,19 +522,29 @@ impl AppState {
             quarantine_checked: HashSet::new(),
             history: Vec::new(),
             history_error: None,
+            history_filter: HistoryFilter::All,
             status: None,
             restoring: None,
             rules: None,
+            settings_advanced: false,
+            key_draft: String::new(),
             home,
             error: None,
+            last_scan_at: None,
             disk: None,
             session_freed: 0,
             last_op: None,
             pending_clean: None,
             pending_purge: None,
-            show_kept: false,
-            request_scale_toggle: false,
+            list_expanded: false,
+            scroll_to_list: false,
             auto: AutoPanel::default(),
+            clean_anim: 0.0,
+            clean_total_items: 0,
+            clean_total_bytes: 0,
+            clean_done_secs: 0.0,
+            clean_was_running: false,
+            clean_was_delete: false,
         }
     }
 
@@ -632,9 +740,7 @@ impl AppState {
             .map(|r| {
                 r.items
                     .iter()
-                    .filter(|c| {
-                        matches!(self.priority_of(c), Priority::Safe | Priority::Suggested)
-                    })
+                    .filter(|c| matches!(self.priority_of(c), Priority::Safe | Priority::Suggested))
                     .map(|c| c.path.display().to_string())
                     .collect()
             })
@@ -685,6 +791,20 @@ impl AppState {
             .count()
     }
 
+    /// 已勾选、但被当前筛选或搜索挡在列表外的项数。
+    ///
+    /// 筛选与搜索只决定「看到哪些行」，从不改动 `checked`。底栏如果只报
+    /// 可见的勾选数，用户会以为只清了眼前这几行，实际却动了更多东西。
+    pub fn checked_outside_filter(&self) -> usize {
+        let Some(r) = &self.result else { return 0 };
+        let visible: std::collections::HashSet<usize> = self.visible_items().into_iter().collect();
+        r.items
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| !visible.contains(i) && self.is_checked(&c.path.display().to_string()))
+            .count()
+    }
+
     /// 把当前勾选变成一份待确认批次。AI 解释一并带上：
     /// 确认框是用户最后一次看到「这一条是什么」的地方。
     pub fn pending_from_checked(&self, mode: molt_act::CleanMode) -> Option<PendingClean> {
@@ -696,7 +816,9 @@ impl AppState {
             .map(|c| PendingItem {
                 path: c.path.clone(),
                 bytes: c.alloc_bytes.max(c.bytes),
-                note: self.ai_note(&c.path.display().to_string()).map(str::to_string),
+                note: self
+                    .ai_note(&c.path.display().to_string())
+                    .map(str::to_string),
             })
             .collect();
         if items.is_empty() {
@@ -785,7 +907,12 @@ impl AppState {
                 let c = &r.items[i];
                 let pr = self.priority_of(c);
                 match self.filter {
-                    Filter::All => pr != Priority::Keep || self.show_kept,
+                    // 「全部」不含保留项：那些东西不会被移动，
+                    // 混在清单里只会让可清理的部分被稀释。想看它们走「保留」这一档。
+                    Filter::All => pr != Priority::Keep,
+                    Filter::Cleanable => {
+                        matches!(pr, Priority::Suggested | Priority::Safe)
+                    }
                     Filter::Suggested => pr == Priority::Suggested,
                     Filter::Reclaimable => pr == Priority::Safe,
                     Filter::Costly => pr == Priority::Costly,
@@ -832,13 +959,38 @@ impl AppState {
         c
     }
 
+    /// 某一档的项数与体积。
+    ///
+    /// 口径与列表分节完全一致（都走 `priority_of`）：三档互不重叠，
+    /// 相加就等于扫到的全部。首页每个数字都能和下面的清单对上——
+    /// 旧版把「扫到的总量」和「能清的量」并排放在最显眼处，
+    /// 用户会以为能腾出前者。
+    pub fn summary_of(&self, pr: Priority) -> (usize, u64) {
+        let Some(r) = &self.result else {
+            return (0, 0);
+        };
+        let mut n = 0;
+        let mut bytes = 0;
+        for c in &r.items {
+            if self.priority_of(c) == pr {
+                n += 1;
+                bytes += c.alloc_bytes.max(c.bytes);
+            }
+        }
+        (n, bytes)
+    }
+
+    /// 「现在就能清」的那一批：建议清理 + 可回收。首页的大数字只讲这一个量。
+    pub fn cleanable_summary(&self) -> (usize, u64) {
+        let (n1, b1) = self.suggested_summary();
+        let (n2, b2) = self.reclaimable_summary();
+        (n1 + n2, b1 + b2)
+    }
+
     /// 某一档里的项数。分节标题要用它，0 项的分节不画。
     pub fn count_of(&self, p: Priority) -> usize {
         let Some(r) = &self.result else { return 0 };
-        r.items
-            .iter()
-            .filter(|c| self.priority_of(c) == p)
-            .count()
+        r.items.iter().filter(|c| self.priority_of(c) == p).count()
     }
 }
 
@@ -925,9 +1077,15 @@ mod tests {
     fn ai_saying_keep_moves_a_row_out_of_the_default_list() {
         let mut s = state_with(vec![cand("/a", 10, Verdict::Reclaimable)]);
         s.ai.safe.insert("/a".to_string(), false);
-        assert!(s.visible_items().is_empty(), "AI 说不要动，默认列表里就不该出现");
+        assert!(
+            s.visible_items().is_empty(),
+            "AI 说不要动，默认列表里就不该出现"
+        );
         // 但仍然可以手动勾选：建议不等于判定
-        assert_eq!(s.priority_of(&s.result.as_ref().unwrap().items[0]), Priority::Keep);
+        assert_eq!(
+            s.priority_of(&s.result.as_ref().unwrap().items[0]),
+            Priority::Keep
+        );
     }
 
     #[test]

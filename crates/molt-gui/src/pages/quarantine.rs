@@ -20,7 +20,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     page_header(
         ui,
         p,
-        "隔离区",
+        "临时空间",
         &format!(
             "从原位置移走的内容会保留 {} 天，期间随时可以还原，也可以在这里彻底删除。",
             crate::paths::DEFAULT_RETAIN_DAYS
@@ -37,7 +37,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     if let Some(err) = state.quarantine_error.clone() {
         card(ui, p, |ui| {
             ui.label(
-                egui::RichText::new("读不到隔离区")
+                egui::RichText::new("读不到临时空间")
                     .size(p.sz(15.0))
                     .strong()
                     .color(p.danger),
@@ -65,7 +65,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
             ui,
             p,
             "◌",
-            "正在读取隔离区…",
+            "正在读取临时空间…",
             "稍等一下，正在从审计库里取出待还原的内容。",
             p.reclaimable,
         );
@@ -77,8 +77,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
             ui,
             p,
             "○",
-            "隔离区是空的",
-            "还没有内容被移进来。在清单里选「移入隔离区」后，那一批会出现在这里，7 天内可还原。",
+            "临时空间是空的",
+            "还没有内容被移进来。在清单里选「放入临时空间」后，那一批会出现在这里，7 天内可还原。",
             p.text_faint,
         );
         return;
@@ -87,7 +87,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     summary_card(ui, state, p);
     ui.add_space(10.0);
 
-    if crate::widgets::op_report(ui, p, state.last_op.as_deref()) {
+    if crate::app::apply_report_action(
+        state,
+        crate::widgets::op_report(ui, p, state.last_op.as_deref()),
+    ) {
         state.last_op = None;
     }
     if state.last_op.is_some() {
@@ -136,6 +139,12 @@ fn summary_card(ui: &mut egui::Ui, state: &AppState, p: &Palette) {
     let bytes: u64 = restorable.iter().map(|r| r.bytes).sum();
     let broken = state.quarantine.len() - restorable.len();
 
+    // 最近到期的那一项：这页最该先说清的就是「什么时候会开始自己没」。
+    let soonest = restorable
+        .iter()
+        .filter_map(|r| days_left(&r.purge_after).map(|d| (d, r)))
+        .min_by_key(|(d, _)| *d);
+
     card(ui, p, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.vertical(|ui| {
@@ -165,6 +174,27 @@ fn summary_card(ui: &mut egui::Ui, state: &AppState, p: &Palette) {
                 )
                 .wrap_mode(egui::TextWrapMode::Wrap),
             );
+            if let Some((d, row)) = soonest {
+                let when = if d > 0 {
+                    format!("{d} 天后")
+                } else {
+                    "今天".to_string()
+                };
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "最近到期：{when} · {}",
+                            crate::paths::friendly_name(
+                                &state.home,
+                                std::path::Path::new(&row.original)
+                            )
+                        ))
+                        .size(p.sz(11.0))
+                        .color(p.costly),
+                    )
+                    .wrap_mode(egui::TextWrapMode::Wrap),
+                );
+            }
             if broken > 0 {
                 ui.add_space(8.0);
                 badge(
@@ -258,13 +288,26 @@ fn line(
                             .wrap_mode(egui::TextWrapMode::Truncate),
                         );
                         let note = if row.restorable {
-                            format!(
-                                "移入时间 {} · 最晚保留到 {}",
-                                short_time(&row.at),
-                                short_time(&row.purge_after)
-                            )
+                            match days_left(&row.purge_after) {
+                                // 「还剩几天」比一个日期有用得多：用户来这页想知道的是
+                                // 会不会没，而不是到期日是哪一天。
+                                Some(d) if d > 0 => format!(
+                                    "移入 {} · 还剩 {d} 天（{} 到期）",
+                                    short_time(&row.at),
+                                    short_time(&row.purge_after)
+                                ),
+                                Some(_) => format!(
+                                    "移入 {} · 今天到期，之后会自动删除",
+                                    short_time(&row.at)
+                                ),
+                                None => format!(
+                                    "移入 {} · 最晚保留到 {}",
+                                    short_time(&row.at),
+                                    short_time(&row.purge_after)
+                                ),
+                            }
                         } else {
-                            "隔离区里已经没有这份内容，只能从列表里清掉记录".to_string()
+                            "临时空间里已经没有这份内容，只能从列表里清掉记录".to_string()
                         };
                         ui.add(
                             egui::Label::new(
@@ -430,7 +473,7 @@ pub fn confirm_purge_modal(ui: &mut egui::Ui, state: &mut AppState, p: &Palette)
             ui.set_width(p.sz(440.0).min(ui.available_width()));
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new("从隔离区彻底删除这些内容？")
+                    egui::RichText::new("从临时空间彻底删除这些内容？")
                         .size(p.sz(17.0))
                         .strong()
                         .color(p.danger),
@@ -752,6 +795,8 @@ fn restore_selected(state: &mut AppState) {
             crate::state::StatusKind::Warn
         },
         failures,
+        // 还原之后要去的地方就是这页的原位置：没有跨页入口。
+        next: None,
     }));
     if let Some(op) = &state.last_op {
         state.status = Some(StatusMessage {
@@ -833,14 +878,14 @@ pub fn pump_purge(state: &mut AppState) {
                 format!("彻底删除没有生效：{first}")
             } else if failures > 0 {
                 format!(
-                    "已从隔离区彻底删除 {} 项，释放 {}；{} 项未删除，原因见下方",
+                    "已从临时空间彻底删除 {} 项，释放 {}；{} 项未删除，原因见下方",
                     report.deleted,
                     molt_scan::human_bytes(report.deleted_bytes),
                     failures
                 )
             } else {
                 format!(
-                    "已从隔离区彻底删除 {} 项，释放 {}",
+                    "已从临时空间彻底删除 {} 项，释放 {}",
                     report.deleted,
                     molt_scan::human_bytes(report.deleted_bytes)
                 )
@@ -857,6 +902,8 @@ pub fn pump_purge(state: &mut AppState) {
                 done_bytes: report.deleted_bytes,
                 failures: report.failures.clone(),
                 kind,
+                // 彻底删除之后唯一的痕迹在历史里。
+                next: Some(crate::state::NextStep::History),
             }));
             state.clear_quarantine_selection();
             reload(state);
@@ -867,6 +914,44 @@ pub fn pump_purge(state: &mut AppState) {
             state.purge_job = Some(job);
         }
     }
+}
+
+/// 从 `purge_after` 算到「还剩几天」。
+///
+/// 只按日期（UTC）算整数天：用户问的是「明天会不会没」，
+/// 精确到分钟只会让文案变长而没有用。
+fn days_left(iso: &str) -> Option<i64> {
+    days_until(iso, &molt_act::now_iso8601())
+}
+
+/// `days_left` 的可测版本：把「现在」也当参数传进来。
+fn days_until(iso: &str, now_iso: &str) -> Option<i64> {
+    Some(civil_days(iso)? - civil_days(now_iso)?)
+}
+
+/// 把 ISO 时间的前 10 个字符（`YYYY-MM-DD`）换成「距 1970-01-01 的天数」。
+///
+/// 自己算而不是引入日期库：整个界面只差一个减法，
+/// 而 Howard Hinnant 这段公历转换是标准做法，六十行依赖换不来别的东西。
+/// 解析不出来返回 `None`——调用方退回显示原日期，不编一个天数。
+fn civil_days(iso: &str) -> Option<i64> {
+    let bytes = iso.as_bytes();
+    if bytes.len() < 10 {
+        return None;
+    }
+    let y: i64 = iso.get(0..4)?.parse().ok()?;
+    let m: i64 = iso.get(5..7)?.parse().ok()?;
+    let d: i64 = iso.get(8..10)?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
 }
 
 /// `2026-10-20T10:00:00Z` → `2026-10-20 10:00`。只用于展示，
@@ -904,6 +989,38 @@ mod tests {
     #[test]
     fn short_time_keeps_the_date_and_minute() {
         assert_eq!(short_time("2026-10-20T10:00:00Z"), "2026-10-20 10:00");
+    }
+
+    #[test]
+    fn days_until_counts_calendar_days() {
+        // 同一天 → 0；明天 → 1；已过期 → 负数
+        assert_eq!(
+            days_until("2026-10-25T23:00:00Z", "2026-10-25T01:00:00Z"),
+            Some(0)
+        );
+        assert_eq!(
+            days_until("2026-10-26T01:00:00Z", "2026-10-25T23:00:00Z"),
+            Some(1)
+        );
+        assert_eq!(
+            days_until("2026-10-20T10:00:00Z", "2026-10-25T10:00:00Z"),
+            Some(-5)
+        );
+        // 跨月与跨年
+        assert_eq!(
+            days_until("2026-11-01T00:00:00Z", "2026-10-31T00:00:00Z"),
+            Some(1)
+        );
+        assert_eq!(
+            days_until("2027-01-01T00:00:00Z", "2026-12-31T00:00:00Z"),
+            Some(1)
+        );
+        // 解析不出来时不编天数
+        assert_eq!(days_until("不是时间", "2026-10-25T10:00:00Z"), None);
+        assert_eq!(
+            days_until("2026-13-01T00:00:00Z", "2026-10-25T10:00:00Z"),
+            None
+        );
     }
 
     #[test]

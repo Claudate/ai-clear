@@ -174,39 +174,48 @@ pub fn badge(ui: &mut egui::Ui, p: &Palette, text: &str, fg: egui::Color32, bg: 
     ui.painter().galley(rect.min + pad, galley, fg);
 }
 
-/// 底部状态条。所有「刚刚发生了什么」都从这里出去——
-/// 弹窗会打断操作，而这个产品大部分操作是低频的、不需要打断。
-pub fn status_bar(ui: &mut egui::Ui, p: &Palette, kind: StatusKind, text: &str) {
-    let (icon_color, soft) = match kind {
-        StatusKind::Info => (p.reclaimable, p.accent_soft),
-        StatusKind::Warn => (p.costly, p.costly_soft),
-        StatusKind::Error => (p.danger, p.danger_soft),
-    };
-    ui.horizontal(|ui| {
-        // 左侧一道色条，比整行换底色更克制：状态条一直在，底色太重会一直抢注意力
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, p.sz(14.0)), egui::Sense::hover());
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(2), icon_color);
-        let _ = soft;
-        ui.add(
-            egui::Label::new(egui::RichText::new(text).size(p.sz(11.5)).color(icon_color))
-                .wrap_mode(egui::TextWrapMode::Wrap),
-        );
-    });
+// 底部状态条已被弹窗取代（见 `app::status_modal`）：结果与报错一律弹出来，
+// 看过即关，不再在窗口底部留一条常驻、容易被忽略的细线。
+// 操作收尾的**结果**仍然走下面的 `op_report`（首页那张报告卡），
+// 因为那里要列逐项失败原因，一张居中的弹窗放不下长清单。
+
+/// 用户对结果条做了什么。
+///
+/// 两个调用方都需要知道「只是关掉」与「要去另一页」的区别：前者清报告就完事，
+/// 后者要先切页、再清报告。用一个枚举表达，比在 bool 上叠一个 Option 清楚。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportAction {
+    /// 还没动
+    None,
+    /// 点「知道了」
+    Dismiss,
+    /// 点了下一步
+    Next(crate::state::NextStep),
 }
 
-/// 一次操作的收尾：结论 + **逐项失败明细**。
+/// 一次操作的收尾：结论 + **逐项失败明细** + 下一步。
 ///
 /// 底部状态条只写一句话，放不下「哪几项没成」。而这条要求是硬的：
 /// 删不掉的项必须说清原因，且不能把失败画成成功。所以有失败时，
 /// 这里把每一条路径和原因都列出来——用户刚看着清单按下确认，
 /// 有权知道具体是哪一项没动、为什么。
-///
-/// 返回值：用户点了「知道了」。调用方据此清掉报告，让页面恢复原样。
-pub fn op_report(ui: &mut egui::Ui, p: &Palette, op: Option<&crate::state::OpReport>) -> bool {
-    let Some(op) = op else { return false };
+pub fn op_report(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    op: Option<&crate::state::OpReport>,
+) -> ReportAction {
+    next_button(ui, p, op).unwrap_or(ReportAction::None)
+}
+
+/// 结果条本身。返回用户点的是哪一下。
+fn next_button(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    op: Option<&crate::state::OpReport>,
+) -> Option<ReportAction> {
+    let op = op?;
     if op.done == 0 && op.failures.is_empty() {
-        return false;
+        return None;
     }
 
     let (tint, soft) = match op.kind {
@@ -214,7 +223,7 @@ pub fn op_report(ui: &mut egui::Ui, p: &Palette, op: Option<&crate::state::OpRep
         StatusKind::Warn => (p.costly, p.costly_soft),
         StatusKind::Error => (p.danger, p.danger_soft),
     };
-    let mut dismiss = false;
+    let mut action = ReportAction::None;
 
     egui::Frame::NONE
         .fill(soft)
@@ -237,7 +246,14 @@ pub fn op_report(ui: &mut egui::Ui, p: &Palette, op: Option<&crate::state::OpRep
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     if secondary_button(ui, p, "知道了", true) {
-                        dismiss = true;
+                        action = ReportAction::Dismiss;
+                    }
+                    // 「下一步」比「知道了」更该被点：做成之后用户要的是接着走，
+                    // 不是把提示关掉。所以它放在关闭按钮左边、用主按钮样式。
+                    if let Some(next) = op.next {
+                        if primary_button(ui, p, next.label(), true) {
+                            action = ReportAction::Next(next);
+                        }
                     }
                 });
             });
@@ -306,7 +322,11 @@ pub fn op_report(ui: &mut egui::Ui, p: &Palette, op: Option<&crate::state::OpRep
             }
         });
 
-    dismiss
+    if action == ReportAction::None {
+        None
+    } else {
+        Some(action)
+    }
 }
 
 /// 空 / 加载 / 出错状态的统一外壳。
@@ -614,6 +634,142 @@ pub fn path_label(ui: &mut egui::Ui, p: &Palette, path: &str) {
     }
 }
 
+/// 一段扇形：从 `start` 度开始、顺时针扫过 `sweep` 度。
+///
+/// 角度以 12 点方向为 0、顺时针为正——这就是钟表的读法，
+/// 用户不需要知道数学上的极坐标是哪一套。
+pub struct Arc {
+    pub start: f32,
+    pub sweep: f32,
+    pub color: egui::Color32,
+}
+
+/// 环形饼图（圆环）。
+///
+/// 为什么是环而不是实心饼：圆心要写字。磁盘清理工具最该被一眼读到的数字
+/// 是「还剩多少」，把字放进圆心，它天然成为整页的视觉重心；
+/// 实心饼图只能把数字挂在旁边，读者还要自己找。
+///
+/// 返回圆心区域，调用方在它上面叠字（`donut_center` 负责排版）。
+/// 尺寸完全由调用方给：这里不假设窗口有多宽。
+/// 需要在不新占一块版面时叠加动画层（清理进度、扫描头），
+/// 用 [`paint_ring`] 在同一个圆心上再画一层。
+pub fn donut(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    diameter: f32,
+    thickness: f32,
+    arcs: &[Arc],
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(diameter, diameter), egui::Sense::hover());
+    let outer = diameter / 2.0;
+    let inner = (outer - thickness).max(0.0);
+    paint_ring(ui.painter(), p, rect.center(), outer, inner, true, arcs);
+    resp
+}
+
+/// 把若干扇区画到给定的圆心与内外半径上。
+///
+/// `base` 为真时先铺一整圈底色——只有最底层需要它；
+/// 叠在它上面的动画层不能铺底，否则会把下面的扇区盖掉。
+pub fn paint_ring(
+    painter: &egui::Painter,
+    p: &Palette,
+    center: egui::Pos2,
+    outer: f32,
+    inner: f32,
+    base: bool,
+    arcs: &[Arc],
+) {
+    // 底环先整圈铺一层：扇区加总不足 360 度时（例如还没扫描，
+    // 「可清理」那一档未知），剩下那段不能是透明的，否则像图没画完。
+    if base {
+        painter.circle_stroke(
+            center,
+            (outer + inner) / 2.0,
+            egui::Stroke::new(outer - inner, p.surface_alt),
+        );
+    }
+
+    let mut mesh = egui::Mesh::default();
+    // 每段 1.2 度：220px 的环上弧长约 2.3px，配合下面的羽化已经看不出折线。
+    const STEP: f32 = 1.2;
+    // 边缘羽化 1px。Mesh 是硬边三角形，不像文字那样自带抗锯齿——
+    // 不加这一圈 alpha=0 的顶点，环的内外圈会是一圈明显的锯齿。
+    const FEATHER: f32 = 1.0;
+    let with_alpha = |c: egui::Color32, a: u8| -> egui::Color32 {
+        egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+    };
+
+    for arc in arcs {
+        if arc.sweep <= 0.0 {
+            continue;
+        }
+        let steps = ((arc.sweep / STEP).ceil() as usize).max(1);
+        let solid = arc.color;
+        let clear = with_alpha(arc.color, 0);
+        for i in 0..steps {
+            let a0 = arc.start + arc.sweep * (i as f32 / steps as f32);
+            let a1 = arc.start + arc.sweep * ((i + 1) as f32 / steps as f32);
+            let at = |deg: f32, r: f32| {
+                let (c, s) = (
+                    (deg - 90.0).to_radians().cos(),
+                    (deg - 90.0).to_radians().sin(),
+                );
+                center + egui::vec2(c * r, s * r)
+            };
+            // 四条同心边：内羽化 → 内实体 → 外实体 → 外羽化
+            let rings = [
+                (inner - FEATHER, clear),
+                (inner, solid),
+                (outer, solid),
+                (outer + FEATHER, clear),
+            ];
+            for w in rings.windows(2) {
+                let (r0, c0) = w[0];
+                let (r1, c1) = w[1];
+                let base = mesh.vertices.len() as u32;
+                for (p, c) in [
+                    (at(a0, r0), c0),
+                    (at(a0, r1), c1),
+                    (at(a1, r1), c1),
+                    (at(a1, r0), c0),
+                ] {
+                    mesh.colored_vertex(p, c);
+                }
+                mesh.add_triangle(base, base + 1, base + 2);
+                mesh.add_triangle(base, base + 2, base + 3);
+            }
+        }
+    }
+    if !mesh.is_empty() {
+        painter.add(egui::Shape::Mesh(mesh.into()));
+    }
+}
+
+/// 首页那唯一一个「下一步就点它」的大按钮。
+///
+/// 比 `primary_button` 更高更宽：这是整页唯一的主操作，在触控板上
+/// 随手点下去就该命中。宽度由调用方限制，这里只保证高度与字号。
+pub fn hero_button(ui: &mut egui::Ui, p: &Palette, text: &str, width: f32, enabled: bool) -> bool {
+    let w = width;
+    let mut btn = egui::Button::new(
+        egui::RichText::new(text)
+            .size(p.sz(18.0))
+            .strong()
+            .color(if enabled { p.on_accent() } else { p.text_faint }),
+    )
+    .corner_radius(egui::CornerRadius::same(RADIUS_CARD))
+    .min_size(egui::vec2(w, p.sz(56.0)));
+    btn = if enabled {
+        btn.fill(p.reclaimable)
+    } else {
+        btn.fill(p.surface_alt)
+            .stroke(egui::Stroke::new(1.0, p.border))
+    };
+    ui.add_enabled(enabled, btn).clicked()
+}
+
 /// 判定色点。比文字更省地方，也比图标更不容易误读。
 pub fn dot(ui: &mut egui::Ui, color: egui::Color32) {
     let d = p_dot();
@@ -677,12 +833,8 @@ pub fn ai_note(ui: &mut egui::Ui, p: &Palette, text: &str) {
         badge(ui, p, "AI", p.costly, p.costly_soft);
         ui.add_space(p.sz(4.0));
         ui.add(
-            egui::Label::new(
-                egui::RichText::new(text)
-                    .size(p.sz(10.5))
-                    .color(p.text_dim),
-            )
-            .wrap_mode(egui::TextWrapMode::Wrap),
+            egui::Label::new(egui::RichText::new(text).size(p.sz(10.5)).color(p.text_dim))
+                .wrap_mode(egui::TextWrapMode::Wrap),
         );
     });
 }

@@ -150,7 +150,8 @@ pub fn decide(
 
     // 7) 闲置建议：放在所有闸门之后算，用的是**最终**判定。
     // 一条规则先说有代价、随后被占用检查按成受保护时，绝不能还挂着「建议清理」。
-    candidate.suggest_clean = should_suggest_clean(&candidate.verdict, stale_days, meta.last_used_days);
+    candidate.suggest_clean =
+        should_suggest_clean(&candidate.verdict, stale_days, meta.last_used_days);
 
     candidate.rule_id = rule_id;
     candidate
@@ -504,7 +505,12 @@ verdict = { type = "costly", cost = "reinstall", needs_network = true, note = "�
     fn suggest_clean_when_idle_days_exceed_the_threshold() {
         let mut m = meta("/p/target/debug");
         m.last_used_days = Some(62);
-        let c = decide(&m, &stale_ruleset(), &Signals::default(), &[PathBuf::from("/p")]);
+        let c = decide(
+            &m,
+            &stale_ruleset(),
+            &Signals::default(),
+            &[PathBuf::from("/p")],
+        );
         assert!(c.suggest_clean, "62 天没动过、阈值 30 天，应当建议清理");
         // 建议归建议，三态判定不能被动过
         assert!(matches!(c.verdict, Verdict::Costly { .. }));
@@ -514,7 +520,12 @@ verdict = { type = "costly", cost = "reinstall", needs_network = true, note = "�
     fn no_suggestion_below_the_threshold() {
         let mut m = meta("/p/target/debug");
         m.last_used_days = Some(3);
-        let c = decide(&m, &stale_ruleset(), &Signals::default(), &[PathBuf::from("/p")]);
+        let c = decide(
+            &m,
+            &stale_ruleset(),
+            &Signals::default(),
+            &[PathBuf::from("/p")],
+        );
         assert!(!c.suggest_clean);
     }
 
@@ -523,7 +534,12 @@ verdict = { type = "costly", cost = "reinstall", needs_network = true, note = "�
         // 没数据不等于很久没用。这里必须保守：`None` 一律不置 true。
         let mut m = meta("/p/target/debug");
         m.last_used_days = None;
-        let c = decide(&m, &stale_ruleset(), &Signals::default(), &[PathBuf::from("/p")]);
+        let c = decide(
+            &m,
+            &stale_ruleset(),
+            &Signals::default(),
+            &[PathBuf::from("/p")],
+        );
         assert!(
             !c.suggest_clean,
             "读不到访问时间时不能凭规则里的阈值就建议删"
@@ -535,7 +551,12 @@ verdict = { type = "costly", cost = "reinstall", needs_network = true, note = "�
         // node_modules 那条没写阈值，即使闲置三年也不该被建议清理
         let mut m = meta("/p/node_modules/x");
         m.last_used_days = Some(1000);
-        let c = decide(&m, &stale_ruleset(), &Signals::default(), &[PathBuf::from("/p")]);
+        let c = decide(
+            &m,
+            &stale_ruleset(),
+            &Signals::default(),
+            &[PathBuf::from("/p")],
+        );
         assert!(!c.suggest_clean);
     }
 
@@ -559,7 +580,12 @@ verdict = { type = "costly", cost = "reinstall", needs_network = true, note = "�
         // 建议清理只给人看：勾选默认值仍然只看三态
         let mut m = meta("/p/target/debug");
         m.last_used_days = Some(90);
-        let c = decide(&m, &stale_ruleset(), &Signals::default(), &[PathBuf::from("/p")]);
+        let c = decide(
+            &m,
+            &stale_ruleset(),
+            &Signals::default(),
+            &[PathBuf::from("/p")],
+        );
         assert!(c.suggest_clean);
         assert!(!c.verdict.default_checked(), "有代价项永远不默认勾选");
     }
@@ -574,7 +600,11 @@ verdict = { type = "costly", cost = "reinstall", needs_network = true, note = "�
         assert!(!should_suggest_clean(&costly, Some(30), Some(29)));
         assert!(!should_suggest_clean(&costly, None, Some(999)));
         assert!(!should_suggest_clean(&costly, Some(30), None));
-        assert!(!should_suggest_clean(&Verdict::Reclaimable, Some(30), Some(999)));
+        assert!(!should_suggest_clean(
+            &Verdict::Reclaimable,
+            Some(30),
+            Some(999)
+        ));
         assert!(!should_suggest_clean(
             &Verdict::Protected {
                 reason: ProtectReason::UserRecord

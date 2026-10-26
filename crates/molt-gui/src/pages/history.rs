@@ -12,7 +12,7 @@
 
 use eframe::egui;
 
-use crate::state::{AppState, HistoryAction, HistoryRow};
+use crate::state::{AppState, HistoryAction, HistoryFilter, HistoryRow};
 use crate::theme::Palette;
 use crate::widgets::{badge, card, page_header, primary_button, secondary_button, state_block};
 
@@ -21,7 +21,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
         ui,
         p,
         "历史",
-        "每一次清理都留一条记录：移入隔离区、还原、彻底删除各自一行。",
+        "每一次清理都留一条记录：放入临时空间、还原、彻底删除各自一行。",
         |ui| {
             if secondary_button(ui, p, "刷新", true) {
                 reload(state);
@@ -90,7 +90,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                 );
                 ui.label(
                     egui::RichText::new(format!(
-                        "{} 项曾移入隔离区 · 累计永久删除 {}",
+                        "{} 项曾放入临时空间 · 累计永久删除 {}",
                         quarantined,
                         molt_scan::human_bytes(purged_bytes)
                     ))
@@ -101,7 +101,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
             ui.add_space(20.0);
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new("要还原或从隔离区彻底删除，请到「隔离区」页。")
+                    egui::RichText::new("要还原或从临时空间彻底删除，请到「临时空间」页。")
                         .size(p.sz(11.5))
                         .color(p.text_faint),
                 )
@@ -111,10 +111,66 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     });
     ui.add_space(10.0);
 
+    ui.add_space(10.0);
+
+    // 筛选：历史会一直累积，用户来这页几乎总是在找一个具体的类别。
+    // 计数直接给在分段上，不点也能看出「永久删了多少次」。
+    let n_all = state.history.len();
+    let n_q = state
+        .history
+        .iter()
+        .filter(|r| r.action == HistoryAction::Quarantined)
+        .count();
+    let n_gone = state
+        .history
+        .iter()
+        .filter(|r| matches!(r.action, HistoryAction::Purged | HistoryAction::Deleted))
+        .count();
+    let n_back = state
+        .history
+        .iter()
+        .filter(|r| r.action == HistoryAction::Restored)
+        .count();
+
+    let opts = [
+        (format!("全部 {n_all}"), HistoryFilter::All),
+        (format!("放入临时空间 {n_q}"), HistoryFilter::Quarantined),
+        (format!("永久删除 {n_gone}"), HistoryFilter::Gone),
+        (format!("已还原 {n_back}"), HistoryFilter::Restored),
+    ];
+    let refs: Vec<(&str, bool)> = opts
+        .iter()
+        .map(|(t, f)| (t.as_str(), state.history_filter == *f))
+        .collect();
+    if let Some(i) = crate::widgets::segmented(ui, p, &refs) {
+        state.history_filter = opts[i].1;
+    }
+    ui.add_space(10.0);
+
     // 虚拟滚动：历史会一直累积，全量绘制会掉帧。
+    // 行数按筛选后算，否则滚到底后会空出一大片。
+    let rows: Vec<HistoryRow> = state
+        .history
+        .iter()
+        .filter(|r| state.history_filter.keeps(r.action))
+        .cloned()
+        .collect();
+
+    if rows.is_empty() {
+        // 两档空态：整页没记录，与「这一档没记录」完全是两回事。
+        state_block(
+            ui,
+            p,
+            "○",
+            "这一类还没有记录",
+            "换到「全部」看看，或者去做一次清理。",
+            p.text_faint,
+        );
+        return;
+    }
+
     let row_h = p.sz(70.0);
-    let total = state.history.len();
-    let rows = state.history.clone();
+    let total = rows.len();
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -274,6 +330,42 @@ pub fn reload(state: &mut AppState) {
         Err(e) => {
             state.history_error = Some(format!("读取审计库失败：{e}"));
             state.history.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gone_covers_both_ways_of_losing_something() {
+        // 「彻底删除」和「直接清理」对用户是同一件事：永久没了。
+        // 分成两档会让两边数字都变小，看不出永久删掉的总量。
+        assert!(HistoryFilter::Gone.keeps(HistoryAction::Purged));
+        assert!(HistoryFilter::Gone.keeps(HistoryAction::Deleted));
+        assert!(!HistoryFilter::Gone.keeps(HistoryAction::Quarantined));
+        assert!(!HistoryFilter::Gone.keeps(HistoryAction::Restored));
+    }
+
+    #[test]
+    fn filters_are_exclusive_and_all_keeps_everything() {
+        for a in [
+            HistoryAction::Quarantined,
+            HistoryAction::Restored,
+            HistoryAction::Purged,
+            HistoryAction::Deleted,
+        ] {
+            assert!(HistoryFilter::All.keeps(a), "「全部」不能漏掉任何一条");
+            let hits = [
+                HistoryFilter::Quarantined,
+                HistoryFilter::Gone,
+                HistoryFilter::Restored,
+            ]
+            .iter()
+            .filter(|f| f.keeps(a))
+            .count();
+            assert_eq!(hits, 1, "{a:?} 应当只落在其中一档里");
         }
     }
 }

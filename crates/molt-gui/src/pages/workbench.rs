@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 
-use crate::state::{AppState, PendingItem, Priority, StatusKind, StatusMessage};
+use crate::state::{AppState, Filter, PendingItem, Priority, StatusKind, StatusMessage};
 use crate::theme::Palette;
 use crate::widgets::{
     ai_note, badge, busy_bar, card, danger_button, danger_ghost_button, page_header,
@@ -24,6 +24,20 @@ use crate::widgets::{
 use molt_act::CleanMode;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
+    // 底栏先占位：主操作必须始终看得见，绝不能随清单滚出屏幕。
+    //
+    // 只在清单展开时出现：折叠状态首页已经有一个满宽的大按钮，
+    // 同一屏摆两个「清这些」会让人不知道该点哪个；而且底栏会吃掉
+    // 首屏高度，把环挤小。
+    let has_items = state
+        .result
+        .as_ref()
+        .map(|r| !r.items.is_empty())
+        .unwrap_or(false);
+    if has_items && state.list_expanded {
+        footer_bar(ui, state, p);
+    }
+
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -37,44 +51,49 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                     failed_card(ui, state, p, &err);
                     return;
                 }
+                // 旧结果还在：不丢掉它，但必须先说明它是旧的。
+                stale_banner(ui, state, p, &err);
             }
 
+            // 磁盘读数不依赖扫描（state.disk 每帧都有），所以下面两条早退路径
+            // 也要先把仪表盘画出来：否则打开软件的第一眼是一张空的扫描卡，
+            // 「盘还剩多少」这件最该先看到的事反而要等扫描跑完。
             let Some(result) = state.result.clone() else {
+                hero(ui, state, p);
+                ui.add_space(12.0);
                 if state.is_scanning() {
                     scanning_card(ui, state, p);
                 } else {
-                    state_block(
+                    hint_line(
                         ui,
                         p,
-                        "○",
-                        "还没有扫描结果",
-                        "点右上角「扫描」开始。扫描只读取文件信息，不会改动任何东西。",
-                        p.text_faint,
+                        "还没有扫描结果。点上面的按钮开始——只读取文件信息，不会改动任何东西。",
                     );
                 }
                 return;
             };
 
             if result.items.is_empty() {
-                state_block(
+                hero(ui, state, p);
+                ui.add_space(12.0);
+                hint_line(
                     ui,
                     p,
-                    "✓",
-                    "没有找到可清理的内容",
-                    "规则覆盖的目录目前都是空的，或者这些工具还没在这台 Mac 上产生缓存。",
-                    p.reclaimable,
+                    "没有找到可清理的内容：规则覆盖的目录目前都是空的，\
+                     或者这些工具还没在这台 Mac 上产生缓存。",
                 );
                 return;
             }
 
             hero(ui, state, p);
             ui.add_space(12.0);
-            ai_bar(ui, state, p);
-            ui.add_space(6.0);
             report_banner(ui, state, p);
-            list(ui, state, p);
-            ui.add_space(10.0);
-            footer(ui, state, p);
+            // 首屏只留一行「看看都清什么」。清单默认收起，否则一屏全被条目吃掉，
+            // 环和大按钮被顶到看不见——而它们才是「一眼看懂」要解决的问题。
+            list_toggle(ui, state, p);
+            if state.list_expanded {
+                list(ui, state, p);
+            }
         });
 }
 
@@ -83,7 +102,7 @@ fn header(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
         ui,
         p,
         "清理",
-        "看看这台 Mac 上哪些能清、哪些该留。扫描只读，动手前一定会再问一次。",
+        "扫描只读；清理先放进临时空间，7 天内可还原。",
         |ui| {
             // 扫描按钮在忙碌时置灰并说明理由：点了没反应是最糟的反馈
             let label = if state.is_scanning() {
@@ -98,249 +117,431 @@ fn header(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     );
 }
 
-/// 顶部结论：不是「有多少」，而是「现在该点哪个按钮」。
+/// 首页主体：一块盘的仪表盘。
+///
+/// 排法参照 360 那类「一眼看懂」的做法：一个环，环心写还剩多少，旁边是
+/// 三色图例与一个满宽大按钮。打开这一页要能同时得到三件事——盘还剩多少、
+/// 能腾多少、下一步点哪——而且都不需要读完一句话。
+///
+/// 磁盘读数不依赖扫描（`state.disk` 每帧都有），所以第一帧就有画面，
+/// 不会出现「打开先看到一张空的扫描卡」。
 fn hero(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
-    let (sug_n, sug_bytes) = state.suggested_summary();
-    let (safe_n, safe_bytes) = state.reclaimable_summary();
-    let costly = state.result.as_ref().map(|r| r.costly_bytes()).unwrap_or(0);
-    let protected = state.result.as_ref().map(|r| r.protected_bytes()).unwrap_or(0);
+    let (clean_n, clean_bytes) = state.cleanable_summary();
 
     card(ui, p, |ui| {
-        // 一行紧凑摘要，而不是三块大数字：这一页的主线是「现在点哪个按钮」，
-        // 三个统计块会把结论和按钮挤到首屏之外，用户反而要多滚一屏才看到该做什么。
-        ui.horizontal_wrapped(|ui| {
-            let chip = |ui: &mut egui::Ui, label: &str, value: String, color: egui::Color32| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(value)
-                                .size(p.sz(19.0))
-                                .strong()
-                                .color(color),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Extend),
-                    );
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(label).size(p.sz(10.5)).color(p.text_faint),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Extend),
-                    );
-                });
-            };
-            chip(
-                ui,
-                &format!("建议清理 {sug_n} + 可回收 {safe_n}"),
-                molt_scan::human_bytes(sug_bytes + safe_bytes),
-                p.reclaimable,
-            );
-            ui.add_space(22.0);
-            chip(
-                ui,
-                "要确认的有代价项",
-                molt_scan::human_bytes(costly),
-                p.costly,
-            );
-            ui.add_space(22.0);
-            chip(ui, "建议保留", molt_scan::human_bytes(protected), p.protected);
-        });
+        // 上下排：环在上、文字与按钮在下。
+        //
+        // 旧版宽窗口时左右分栏，用户的眼睛要在环与按钮之间来回横跳；
+        // 这一页只回答一件事——「清多少、点哪个」，那就必须是一条从环
+        // 向下读到底的竖线。宽度用窗口宽度判：这一页在 ScrollArea 里，
+        // `available_width` 拿到的是可滚动范围，判什么都是「够宽」。
+        let screen_w = ui.ctx().content_rect().width();
+        let d = (screen_w * 0.30).clamp(p.sz(180.0), p.sz(300.0));
 
-        ui.add_space(10.0);
-        crate::widgets::hairline(ui, p);
-
-        // 结论 + 主按钮
-        let busy = state.activity();
-        if sug_n + safe_n > 0 {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(format!(
-                        "可以先清 {} 项、共 {}",
-                        sug_n + safe_n,
-                        molt_scan::human_bytes(sug_bytes + safe_bytes)
-                    ))
-                    .size(p.sz(18.0))
-                    .strong(),
-                )
-                .wrap_mode(egui::TextWrapMode::Wrap),
-            );
-            ui.add_space(3.0);
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(
-                        "这些删了会自动重建，或用处已经很小。默认已帮你勾好，点下面按钮会先让你确认。",
-                    )
-                    .size(p.sz(12.0))
-                    .color(p.text_dim),
-                )
-                .wrap_mode(egui::TextWrapMode::Wrap),
-            );
-            ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
-                if primary_button(ui, p, "清理这些（可还原）", state.can_start()) {
-                    // 用当前默认勾选（建议清理 + 可回收）。不再在这里重新选一遍：
-                    // 用户可能已经手动取消过其中几条，重选会把他的选择悄悄改回来。
-                    state.pending_clean = state.pending_from_checked(CleanMode::Quarantine);
-                }
-                if busy.is_busy() {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(busy.blocking_hint())
-                                .size(p.sz(10.5))
-                                .color(p.text_faint),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Wrap),
-                    );
-                }
-            });
-        } else {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new("没有可以直接清理的缓存")
-                        .size(p.sz(17.0))
-                        .strong(),
-                )
-                .wrap_mode(egui::TextWrapMode::Wrap),
-            );
-            ui.add_space(3.0);
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(if costly > 0 {
-                        format!(
-                            "还有 {} 属于「能腾但要重建」，需要你逐条看过再决定。",
-                            molt_scan::human_bytes(costly)
-                        )
-                    } else {
-                        "扫到的都是你自己的记录，这个工具不会动它们。".to_string()
-                    })
-                    .size(p.sz(12.0))
-                    .color(p.text_dim),
-                )
-                .wrap_mode(egui::TextWrapMode::Wrap),
-            );
-        }
+        ui.vertical_centered(|ui| ring(ui, state, p, d, clean_bytes));
+        ui.add_space(p.sz(18.0));
+        dashboard_side(ui, state, p, clean_n, clean_bytes);
     });
 }
 
-/// AI 那一条：不再是独立页面，就是主线上的一个按钮与一行状态。
-fn ai_bar(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
-    card(ui, p, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("AI 解释").size(p.sz(13.5)).strong());
+/// 圆环本体：三段扇区 + 圆心的三行字，以及清理时的动画叠层。
+///
+/// 分三段而不是两块：用户要知道「能清掉的那部分在整块盘里占多大」，
+/// 所以可清理单独一色，剩下的已用是中性色，可用是浅色。
+///
+/// 清理进行中时，在上面叠一层满绿弧（从 12 点顺时针长出去）：
+/// 环本身在动、圆心也在数数，用户不需要读任何文字就知道「它正在干活」。
+fn ring(ui: &mut egui::Ui, state: &AppState, p: &Palette, d: f32, clean_bytes: u64) {
+    use crate::widgets::Arc;
 
-            if state.ai.is_running() {
-                let stage = match state.ai.job.as_ref().map(|j| j.peek()) {
-                    Some(crate::ai_worker::AiProgress::Stage(
-                        crate::ai_worker::AiStage::Calling { .. },
-                    )) => "正在请求模型…",
-                    Some(crate::ai_worker::AiProgress::Stage(
-                        crate::ai_worker::AiStage::Building,
-                    )) => "正在核对方案…",
-                    _ => "正在整理摘要…",
-                };
-                badge(ui, p, stage, p.costly, p.costly_soft);
-                ui.add_space(6.0);
-                busy_bar(ui, p, p.sz(140.0));
-            } else if state.ai.has_notes() {
-                let n = state.ai.notes.len();
-                badge(
-                    ui,
-                    p,
-                    &format!("已解释 {n} 条"),
-                    p.reclaimable,
-                    p.accent_soft,
-                );
-                if let Some(m) = &state.ai.last_model {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!("由 {m} 给出"))
-                                .size(p.sz(10.5))
-                                .color(p.text_faint),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Extend),
-                    );
-                }
-            } else if let Some(f) = &state.ai.failure {
-                badge(ui, p, "解释失败", p.danger, p.danger_soft);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(crate::app::short(&f.message, 48))
-                            .size(p.sz(10.5))
-                            .color(p.danger),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Truncate),
-                );
-            } else {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new("还没让 AI 看过这次扫描")
-                            .size(p.sz(11.0))
-                            .color(p.text_faint),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Extend),
-                );
+    let thick = (d * 0.115).max(p.sz(10.0));
+    let mut arcs: Vec<Arc> = Vec::new();
+    let headline: String;
+    let headline_color: egui::Color32;
+    let footnote: String;
+
+    // 清理中 / 刚清完：圆心写进度与结果，而不是磁盘数字。
+    // 判据用动画本身而不是 `is_cleaning()`：动画只在清理期间被推进，
+    // 被中断时立刻归零，所以「弧还在」就等于「正在清」。
+    let anim = state.clean_anim.clamp(0.0, 1.0);
+    let done = state.clean_done_secs > 0.0;
+    let cleaning = (anim > 0.0 && !done) || state.is_cleaning();
+
+    match &state.disk {
+        Some(Ok(disk)) => {
+            let denom = (disk.used + disk.available).max(1) as f32;
+            let used_share = disk.used as f32 / denom;
+            let avail_share = disk.available as f32 / denom;
+            // 「可清理」最多只能占「已用」那一段：它本来就是已用空间里的缓存，
+            // 若因读数抖动算超过已用，环上会出现一块不属于任何含义的颜色。
+            let clean_share = (clean_bytes as f32 / denom).min(used_share);
+
+            let mut at = 0.0;
+            if clean_share > 0.0 {
+                let sweep = clean_share * 360.0;
+                arcs.push(Arc {
+                    start: at,
+                    sweep,
+                    color: p.reclaimable,
+                });
+                at += sweep;
             }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let resolved = state.ai.resolve();
-                let label = if state.ai.has_notes() {
-                    "重新解释"
-                } else {
-                    "让 AI 解释"
-                };
-                let enabled = state.can_start() && resolved.is_ok();
-                if secondary_button(ui, p, label, enabled) {
-                    start_analysis(state);
-                }
-                if let Err(reason) = &resolved {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(crate::app::short(reason, 40))
-                                .size(p.sz(10.0))
-                                .color(p.text_faint),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Truncate),
-                    );
-                }
+            let rest = (used_share - clean_share).max(0.0) * 360.0;
+            if rest > 0.0 {
+                arcs.push(Arc {
+                    start: at,
+                    sweep: rest,
+                    color: p.used_bar,
+                });
+                at += rest;
+            }
+            arcs.push(Arc {
+                start: at,
+                sweep: avail_share * 360.0,
+                color: p.border_strong,
             });
-        });
 
-        // 失败要说全原因，并给出「去设置」的路——那一页才有密钥与模型。
-        if let Some(f) = state.ai.failure.clone() {
-            if !state.ai.is_running() {
-                ui.add_space(6.0);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!("这件事不影响本地清理：{}", f.message))
-                            .size(p.sz(11.0))
-                            .color(p.danger),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Wrap),
-                );
-                if f.fixable_by_config && secondary_button(ui, p, "去设置检查 AI 配置", true) {
-                    state.page = crate::state::Page::Settings;
-                }
+            headline = molt_scan::human_bytes(disk.available);
+            headline_color = if avail_share < 0.10 {
+                p.danger
+            } else if avail_share < 0.20 {
+                p.costly
+            } else {
+                p.reclaimable
+            };
+            footnote = if state.result.is_none() && state.is_scanning() {
+                format!("共 {} · 正在检查", molt_scan::human_bytes(disk.total))
+            } else if state.result.is_none() {
+                format!("共 {} · 还没开始扫描", molt_scan::human_bytes(disk.total))
+            } else {
+                format!(
+                    "共 {} · 已用 {:.0}%",
+                    molt_scan::human_bytes(disk.total),
+                    used_share * 100.0
+                )
+            };
+        }
+        // 读不到就不画扇区、也不编数字：一条 0% 的环会让人以为盘是空的。
+        _ => {
+            headline = "—".to_string();
+            headline_color = p.text_dim;
+            footnote = "读不到磁盘容量".to_string();
+        }
+    }
+
+    let resp = crate::widgets::donut(ui, p, d, thick, &arcs);
+    let center = resp.rect.center();
+    let outer = d / 2.0;
+    let inner = (outer - thick).max(0.0);
+
+    // ---- 清理动画层：叠在盘使用的扇区之上 ----
+    if anim > 0.0 || cleaning || done {
+        let progress = if done { 1.0 } else { anim };
+
+        // 先把整圈压暗一层。不压暗的话，进度弧和底下「可清理」那段是同一种绿，
+        // 叠上去几乎看不出来——「正在清」就成了需要仔细比对才发现的差别。
+        let veil =
+            egui::Color32::from_rgba_unmultiplied(p.surface.r(), p.surface.g(), p.surface.b(), 190);
+        crate::widgets::paint_ring(
+            ui.painter(),
+            p,
+            center,
+            outer,
+            inner,
+            false,
+            &[Arc {
+                start: 0.0,
+                sweep: 360.0,
+                color: veil,
+            }],
+        );
+
+        let overlay = [Arc {
+            start: 0.0,
+            sweep: progress * 360.0,
+            color: p.reclaimable,
+        }];
+        // 不铺底环（`base = false`）：底下是磁盘真数字，盖掉就变成两张图
+        crate::widgets::paint_ring(ui.painter(), p, center, outer, inner, false, &overlay);
+
+        // 进度头：一个亮点跟着弧头跑。静止的弧看不出「还在动」，
+        // 而清理可能持续几十秒，用户需要看到它在走。
+        if cleaning && progress > 0.01 && progress < 0.999 {
+            let deg = progress * 360.0 - 90.0;
+            let (sn, cs) = (deg.to_radians().sin(), deg.to_radians().cos());
+            let mid = (outer + inner) / 2.0;
+            let head = center + egui::vec2(cs * mid, sn * mid);
+            ui.painter()
+                .circle_filled(head, thick * 0.62, p.reclaimable.gamma_multiply(0.45));
+            ui.painter()
+                .circle_filled(head, thick * 0.34, egui::Color32::WHITE);
+        }
+    }
+
+    let big = (d * 0.135).clamp(p.sz(15.0), p.sz(30.0));
+    let small = (d * 0.048).clamp(p.sz(8.5), p.sz(11.5));
+
+    // 圆心三行：清理中 → 百分比；刚清完 → 腾出多少；其余 → 磁盘读数
+    let (top, mid, mid_color, bottom) = if cleaning {
+        (
+            "正在清理".to_string(),
+            format!("{:.0}%", (anim * 100.0).min(99.0)),
+            p.reclaimable,
+            if state.clean_total_items > 0 {
+                format!(
+                    "共 {} 项 · {}",
+                    state.clean_total_items,
+                    molt_scan::human_bytes(state.clean_total_bytes)
+                )
+            } else {
+                "请稍候…".to_string()
+            },
+        )
+    } else if done {
+        (
+            "清理完成".to_string(),
+            format!("+{}", molt_scan::human_bytes(state.clean_total_bytes)),
+            p.reclaimable,
+            if state.clean_was_delete {
+                "已腾出空间".to_string()
+            } else {
+                "已放进临时空间".to_string()
+            },
+        )
+    } else {
+        ("还剩".to_string(), headline, headline_color, footnote)
+    };
+
+    ui.painter().text(
+        egui::pos2(center.x, center.y - big * 0.92),
+        egui::Align2::CENTER_CENTER,
+        top,
+        egui::FontId::proportional(small),
+        p.text_dim,
+    );
+    ui.painter().text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        &mid,
+        egui::FontId::proportional(big),
+        mid_color,
+    );
+    ui.painter().text(
+        egui::pos2(center.x, center.y + big * 0.86),
+        egui::Align2::CENTER_CENTER,
+        &bottom,
+        egui::FontId::proportional(small),
+        p.text_faint,
+    );
+}
+
+/// 首页那颗大按钮按下之后做什么。
+///
+/// 抽成函数是为了让测试能走「点按钮」这条真路径，而不是在测试里把同样的
+/// 分支再写一遍——那样界面改了、测试还是绿的。
+///
+/// 有可清理量时走 `pending_from_checked`，和底栏是同一个入口：
+/// 首页不另开一条执行路径，否则两处对「默认清什么」的理解会慢慢走偏。
+pub fn hero_action(state: &mut AppState) {
+    let (clean_n, _) = state.cleanable_summary();
+    if clean_n > 0 {
+        state.pending_clean = state.pending_from_checked(CleanMode::Quarantine);
+    } else {
+        start_scan(state);
+    }
+}
+
+/// 环右侧（窄窗口时是环下方）的图例与主按钮。
+fn dashboard_side(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    p: &Palette,
+    clean_n: usize,
+    clean_bytes: u64,
+) {
+    // 先把磁盘数字取出来，后面改 state 时不再借它。
+    let disk = match &state.disk {
+        Some(Ok(d)) => Some((d.used, d.available)),
+        _ => None,
+    };
+
+    let mut go_list = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = p.sz(18.0);
+        let clean_value = if state.result.is_none() {
+            "—".to_string()
+        } else {
+            molt_scan::human_bytes(clean_bytes)
+        };
+        if legend(ui, p, p.reclaimable, "可清理", &clean_value) && state.result.is_some() {
+            go_list = true;
+        }
+        if let Some((used, available)) = disk {
+            legend_readonly(ui, p, p.used_bar, "已用", &molt_scan::human_bytes(used));
+            legend_readonly(
+                ui,
+                p,
+                p.border_strong,
+                "可用",
+                &molt_scan::human_bytes(available),
+            );
+        }
+    });
+    if go_list {
+        state.filter = Filter::Cleanable;
+        state.list_expanded = true;
+        state.scroll_to_list = true;
+    }
+
+    ui.add_space(p.sz(14.0));
+
+    let scanning = state.is_scanning();
+    let can = state.can_start();
+
+    // 两种清理方式并排：左边是默认的「放入临时空间」，右边是「直接清理」。
+    //
+    // 用户明确要两个选项，而不是一个主按钮加一个措辞模糊的尾巴：
+    // 「直接清理」能真的腾出空间，「放入临时空间」能反悔。这是两种目的，
+    // 不是两种危险程度，所以两个都得看得见、都能点。
+    ui.vertical_centered(|ui| {
+        let label = if scanning {
+            "正在检查…".to_string()
+        } else if state.is_cleaning() {
+            "正在清理…".to_string()
+        } else if clean_n > 0 {
+            format!(
+                "放入临时空间 · {}（{} 天可还原）",
+                molt_scan::human_bytes(clean_bytes),
+                crate::paths::DEFAULT_RETAIN_DAYS
+            )
+        } else if state.result.is_some() {
+            "重新扫描".to_string()
+        } else {
+            "开始扫描".to_string()
+        };
+        let enabled = !scanning && can;
+        // 限宽而不是满宽：一条通栏的长条会盖过圆环，
+        // 而它只是「下一步」，不该比环更抢眼。
+        let w = ui.available_width().min(p.sz(460.0));
+        if crate::widgets::hero_button(ui, p, &label, w, enabled) {
+            hero_action(state);
+        }
+
+        // 「直接清理」：同一次勾选，另一种模式。它不抢主位，但也不藏进省略号。
+        if clean_n > 0 && !scanning {
+            ui.add_space(p.sz(8.0));
+            let dl = format!(
+                "直接清理掉 {}（不可恢复）",
+                molt_scan::human_bytes(clean_bytes)
+            );
+            if danger_ghost_button(ui, p, &dl, can) {
+                state.pending_clean = state.pending_from_checked(CleanMode::Delete);
             }
         }
 
-        if state.ai.has_notes() {
-            ui.add_space(4.0);
+        if !enabled && !scanning {
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(
-                        "模型只给解释与建议；能不能动由本地规则判定，受保护的内容永远不会被移动。",
-                    )
-                    .size(p.sz(10.5))
-                    .color(p.text_faint),
+                    egui::RichText::new(state.activity().blocking_hint())
+                        .size(p.sz(11.0))
+                        .color(p.costly),
                 )
                 .wrap_mode(egui::TextWrapMode::Wrap),
             );
         }
     });
+
+    ui.add_space(p.sz(8.0));
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(
+                "只清理能自动重建的缓存，你的文件、密钥、聊天记录不会被碰。\
+                 清理后 7 天内可随时还原，期间空间不会立刻变多。",
+            )
+            .size(p.sz(11.0))
+            .color(p.text_dim),
+        )
+        .wrap_mode(egui::TextWrapMode::Wrap),
+    );
+
+    if state.session_freed > 0 {
+        ui.add_space(p.sz(4.0));
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!(
+                    "本次运行已腾出 {}",
+                    molt_scan::human_bytes(state.session_freed)
+                ))
+                .size(p.sz(12.0))
+                .strong()
+                .color(p.reclaimable),
+            )
+            .wrap_mode(egui::TextWrapMode::Extend),
+        );
+    }
+}
+
+/// 图例一格（可点）。返回是否被点中。
+///
+/// 图例放在环旁边而不是贴着弧线做指引线：指引线在窄窗口里会互相压住，
+/// 图例换行只是多占一行，永远读得清。
+fn legend(ui: &mut egui::Ui, p: &Palette, color: egui::Color32, label: &str, value: &str) -> bool {
+    let resp = ui.horizontal(|ui| legend_body(ui, p, color, label, value));
+    let hit = resp.response.interact(egui::Sense::click());
+    if hit.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    hit.clicked()
+}
+
+fn legend_readonly(ui: &mut egui::Ui, p: &Palette, color: egui::Color32, label: &str, value: &str) {
+    ui.horizontal(|ui| legend_body(ui, p, color, label, value));
+}
+
+fn legend_body(ui: &mut egui::Ui, p: &Palette, color: egui::Color32, label: &str, value: &str) {
+    ui.spacing_mut().item_spacing.x = p.sz(5.0);
+    crate::widgets::dot(ui, color);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(label)
+                .size(p.sz(11.5))
+                .color(p.text_dim),
+        )
+        .wrap_mode(egui::TextWrapMode::Extend),
+    );
+    ui.add(
+        egui::Label::new(egui::RichText::new(value).size(p.sz(15.0)).strong())
+            .wrap_mode(egui::TextWrapMode::Extend),
+    );
+}
+
+/// 一行可点的文字链：用来把「还有一档」直接指到清单里的对应分段。
+///
+/// 首页只放结论，不铺明细；想看某一档的条目时，点这里就跳到清单并切好筛选——
+/// 比让用户自己去底部找分段控件少一步。
+fn link(ui: &mut egui::Ui, p: &Palette, text: &str, color: egui::Color32) -> bool {
+    let resp = ui.add(
+        egui::Label::new(egui::RichText::new(text).size(p.sz(11.5)).color(color))
+            .wrap_mode(egui::TextWrapMode::Extend)
+            .sense(egui::Sense::click()),
+    );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        let r = resp.rect;
+        ui.painter().hline(
+            r.left()..=r.right(),
+            r.bottom() + 1.0,
+            egui::Stroke::new(1.0, color),
+        );
+    }
+    resp.clicked()
 }
 
 fn report_banner(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
-    if crate::widgets::op_report(ui, p, state.last_op.as_deref()) {
+    if crate::app::apply_report_action(
+        state,
+        crate::widgets::op_report(ui, p, state.last_op.as_deref()),
+    ) {
         state.last_op = None;
     }
     if state.last_op.is_some() {
@@ -348,160 +549,122 @@ fn report_banner(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     }
 }
 
-/// 按优先级分节列出数据。
+/// 重扫失败但旧结果还在时，先说清「下面这些是什么时候的」。
+///
+/// 不这么做的话，用户看到的是上一次成功的数字，却以为刚扫过——而清理
+/// 是按这些数字做的决定，代价可能是一次不必要的重建。
+fn stale_banner(ui: &mut egui::Ui, state: &mut AppState, p: &Palette, err: &str) {
+    egui::Frame::NONE
+        .fill(p.costly_soft)
+        .stroke(egui::Stroke::new(1.0, p.costly.gamma_multiply(0.35)))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::symmetric(14, 11))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("这次扫描失败：{err}"))
+                            .size(p.sz(12.0))
+                            .strong()
+                            .color(p.costly),
+                    )
+                    .wrap_mode(egui::TextWrapMode::Wrap),
+                );
+                if let Some(at) = &state.last_scan_at {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("下面仍是 {at} 那次的结果"))
+                                .size(p.sz(11.0))
+                                .color(p.text_dim),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Wrap),
+                    );
+                } else {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("下面是一份较早的结果")
+                                .size(p.sz(11.0))
+                                .color(p.text_dim),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Wrap),
+                    );
+                }
+                if secondary_button(ui, p, "重试", state.can_start()) {
+                    start_scan(state);
+                }
+            });
+        });
+    ui.add_space(10.0);
+}
+
+/// 仪表盘下方的一行说明。
+///
+/// 空态不该再用一整块居中提示占掉半屏：仪表盘已经把「还剩多少」讲清楚了，
+/// 这里只需要补一句「为什么清单是空的」。
+fn hint_line(ui: &mut egui::Ui, p: &Palette, text: &str) {
+    ui.add(
+        egui::Label::new(egui::RichText::new(text).size(p.sz(12.0)).color(p.text_dim))
+            .wrap_mode(egui::TextWrapMode::Wrap),
+    );
+}
+
+/// 「看看都清什么（24 项）」那一行。点开才走完整的工具条与分节清单。
+///
+/// 为什么折叠：清单一次列二十多项，用户第一眼看到的是「一堆不认识的名字」；
+/// 而这一页真正要回答的是「还剩多少、能腾多少、点哪个」。
+fn list_toggle(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
+    let total = state.result.as_ref().map(|r| r.items.len()).unwrap_or(0);
+    let label = if state.list_expanded {
+        "收起清单 \u{25b4}".to_string()
+    } else {
+        format!("看看都清什么（{total} 项） \u{25b8}")
+    };
+    if secondary_button(ui, p, &label, true) {
+        state.list_expanded = !state.list_expanded;
+        if state.list_expanded {
+            state.scroll_to_list = true;
+        }
+    }
+}
+
+/// 分档清单：只在用户点了「看看都清什么」之后才走。
+///
+/// 打开首页时的目标很窄——**看清能清多少、然后点清理**。所以清单默认收起，
+/// 顶部一行分段筛选，想只看某一档时点一下就换，不靠滚；
+/// AI 解释收进这一行右侧的一个按钮，因为它是可选动作。
 fn list(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     let Some(result) = state.result.clone() else {
         return;
     };
     let busy = state.activity();
 
-    // 搜索框：几百项里找一条路径靠滚是不现实的
-    ui.horizontal_wrapped(|ui| {
-        let edit = egui::TextEdit::singleline(&mut state.query)
-            .hint_text(
-                egui::RichText::new("搜索名字或路径")
-                    .size(p.sz(12.0))
-                    .color(p.text_faint),
-            )
-            .desired_width(220.0 * p.scale)
-            .margin(egui::Margin::symmetric(8, 6));
-        ui.add(edit);
-        if !state.query.is_empty() && secondary_button(ui, p, "清空", true) {
-            state.query.clear();
-        }
-        if busy.is_busy() {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(busy.blocking_hint())
-                        .size(p.sz(10.5))
-                        .color(p.costly),
-                )
-                .wrap_mode(egui::TextWrapMode::Extend),
-            );
-        }
-    });
-    ui.add_space(8.0);
+    toolbar(ui, state, p, &busy);
+    ui.add_space(10.0);
+
+    // hero 里的「要重建 / 是你的记录」两个入口只设了筛选，用户点了如果没滚动，
+    // 会觉得「什么都没发生」——清单在屏幕外。这里把视图移到清单开头。
+    if state.scroll_to_list {
+        state.scroll_to_list = false;
+        ui.scroll_to_rect(ui.max_rect(), Some(egui::Align::TOP));
+    }
 
     let visible = state.visible_items();
     if visible.is_empty() {
-        // 「全部受保护」是一种真实且常见的结果（用户的记录、密钥、占用中的文件），
-        // 不能画成「这一档里没有内容」——那会让用户以为扫描什么都没找到，
-        // 而实际上有一大堆内容正被明确建议保留。
-        let kept = state.count_of(Priority::Keep);
-        if kept > 0 && state.query.is_empty() {
-            let bytes: u64 = result
-                .items
-                .iter()
-                .filter(|c| state.priority_of(c) == Priority::Keep)
-                .map(|c| c.alloc_bytes.max(c.bytes))
-                .sum();
-            card(ui, p, |ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new("这次扫到的内容都建议保留")
-                            .size(p.sz(15.0))
-                            .strong(),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Wrap),
-                );
-                ui.add_space(3.0);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!(
-                            "{} 项、共 {}：都是你的记录、密钥或正在被使用的内容，这个工具不会移动它们。",
-                            kept,
-                            molt_scan::human_bytes(bytes)
-                        ))
-                        .size(p.sz(12.0))
-                        .color(p.text_dim),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Wrap),
-                );
-                ui.add_space(10.0);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new("下面就是这一批，标了「不会动」的都不参与清理。")
-                            .size(p.sz(11.0))
-                            .color(p.text_faint),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Wrap),
-                );
-            });
-
-            // 就地列出，不跳页：用户要的是「它们是什么」，不是换一页再看一遍。
-            // 这一批不可勾选，所以不走 `row` 的点击路径，只做展示。
-            let shown: Vec<usize> = (0..result.items.len())
-                .filter(|&i| state.priority_of(&result.items[i]) == Priority::Keep)
-                .collect();
-            ui.add_space(8.0);
-            section_header(ui, p, "建议保留", "不会被移动", kept, bytes, p.protected);
-            for i in &shown {
-                let c = &result.items[*i];
-                ui.horizontal_wrapped(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(crate::paths::friendly_name(&state.home, &c.path))
-                                .size(p.sz(12.0))
-                                .color(p.text),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Truncate),
-                    );
-                    badge(ui, p, "不会动", p.protected, p.surface_alt);
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(molt_scan::human_bytes(
-                                c.alloc_bytes.max(c.bytes),
-                            ))
-                            .size(p.sz(11.0))
-                            .color(p.text_dim),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Extend),
-                    );
-                });
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(c.verdict.explanation())
-                            .size(p.sz(10.5))
-                            .color(p.text_faint),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Wrap),
-                );
-                if let Some(n) = state.ai_note(&c.path.display().to_string()) {
-                    ai_note(ui, p, n);
-                }
-                ui.add_space(4.0);
-            }
-            return;
-        }
-
-        state_block(
-            ui,
-            p,
-            "○",
-            if state.query.is_empty() {
-                "这一档里没有内容"
-            } else {
-                "没有匹配的内容"
-            },
-            "换个关键词，或者清掉搜索框看全部。",
-            p.text_faint,
-        );
-        if !state.query.is_empty() && secondary_button(ui, p, "清空搜索", true) {
-            state.query.clear();
-        }
+        empty_list(ui, state, p, &result);
         return;
     }
 
-    // 按档分组，每组一个分节标题。用户读到的顺序就是动手的顺序。
+    let mut toggle: Option<String> = None;
+
     let groups = [
-        (Priority::Suggested, "建议清理", "先动这一批", p.costly),
-        (Priority::Safe, "可以安全清理", "删了会自动重建", p.reclaimable),
-        (Priority::Costly, "要你确认", "能腾空间，但要重建", p.costly),
-        (Priority::Keep, "建议保留", "不会被移动", p.protected),
+        (Priority::Suggested, p.costly),
+        (Priority::Safe, p.reclaimable),
+        (Priority::Costly, p.costly),
+        (Priority::Keep, p.protected),
     ];
 
-    let mut toggle: Option<String> = None;
-    for (pr, title, hint, tint) in groups {
+    for (pr, tint) in groups {
         let rows: Vec<usize> = visible
             .iter()
             .copied()
@@ -515,18 +678,209 @@ fn list(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
             .map(|&i| result.items[i].alloc_bytes.max(result.items[i].bytes))
             .sum();
 
-        section_header(ui, p, title, hint, rows.len(), bytes, tint);
+        section_header(ui, p, pr.label(), pr.hint(), rows.len(), bytes, tint);
+
+        // 清单是用户主动点开的，就不在每节里再藏几行——
+        // 连续两次「展开」会让人以为后面还有更隐蔽的东西。
         for i in &rows {
             if row(ui, state, p, &result, *i) {
                 toggle = Some(result.items[*i].path.display().to_string());
             }
         }
-        ui.add_space(8.0);
+        ui.add_space(12.0);
     }
 
     if let Some(path) = toggle {
         state.toggle(&path);
     }
+}
+
+/// 清单上方的工具条：筛选分段 + 搜索 + AI 解释入口。
+fn toolbar(ui: &mut egui::Ui, state: &mut AppState, p: &Palette, busy: &crate::state::Activity) {
+    let (clean_n, clean_bytes) = state.cleanable_summary();
+    let (costly_n, _) = state.summary_of(Priority::Costly);
+    let (keep_n, _) = state.summary_of(Priority::Keep);
+    let total_n = clean_n + costly_n + keep_n;
+
+    ui.horizontal_wrapped(|ui| {
+        let opts = [
+            (
+                format!(
+                    "能清 {clean_n} 项 · {}",
+                    molt_scan::human_bytes(clean_bytes)
+                ),
+                state.filter == Filter::Cleanable,
+            ),
+            (format!("要确认 {costly_n}"), state.filter == Filter::Costly),
+            (format!("保留 {keep_n}"), state.filter == Filter::Protected),
+            (format!("全部 {total_n}"), state.filter == Filter::All),
+        ];
+        let refs: Vec<(&str, bool)> = opts.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+        if let Some(i) = crate::widgets::segmented(ui, p, &refs) {
+            state.filter = match i {
+                0 => Filter::Cleanable,
+                1 => Filter::Costly,
+                2 => Filter::Protected,
+                _ => Filter::All,
+            };
+            state.list_expanded = true;
+        }
+
+        // 筛选一旦不是「全部」，就必须永远有一条回得去的路。
+        // hero 里的两个链接会切筛选，用户点完只看到列表变了、却找不到开关。
+        if state.filter != Filter::All && link(ui, p, "显示全部", p.reclaimable) {
+            state.filter = Filter::All;
+        }
+
+        ui.add_space(8.0);
+        let edit = egui::TextEdit::singleline(&mut state.query)
+            .hint_text(
+                egui::RichText::new("搜索名字或路径")
+                    .size(p.sz(12.0))
+                    .color(p.text_faint),
+            )
+            .desired_width(200.0 * p.scale)
+            .margin(egui::Margin::symmetric(8, 6));
+        ui.add(edit);
+        if !state.query.is_empty() && secondary_button(ui, p, "清空", true) {
+            state.query.clear();
+        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ai_action(ui, state, p, busy);
+        });
+    });
+
+    if busy.is_busy() {
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(busy.blocking_hint())
+                    .size(p.sz(10.5))
+                    .color(p.costly),
+            )
+            .wrap_mode(egui::TextWrapMode::Wrap),
+        );
+    }
+}
+
+/// AI 解释：一个按钮 + 一行状态，不再是一张独立的卡片。
+fn ai_action(ui: &mut egui::Ui, state: &mut AppState, p: &Palette, busy: &crate::state::Activity) {
+    if state.ai.is_running() {
+        badge(ui, p, "AI 正在解释…", p.costly, p.costly_soft);
+        busy_bar(ui, p, p.sz(90.0));
+        return;
+    }
+    if state.ai.has_notes() {
+        badge(
+            ui,
+            p,
+            &format!("AI 已解释 {} 条", state.ai.notes.len()),
+            p.reclaimable,
+            p.accent_soft,
+        );
+        ui.add_space(4.0);
+    }
+    let resolved = state.ai.resolve();
+    let label = if state.ai.has_notes() {
+        "重新解释"
+    } else {
+        "让 AI 解释"
+    };
+    if secondary_button(ui, p, label, state.can_start() && resolved.is_ok()) {
+        start_analysis(state);
+    }
+    if let Some(f) = &state.ai.failure {
+        if !state.ai.is_running() {
+            // 顺序：原因在左、动作在右。这段画在 right_to_left 布局里，
+            // 所以先加的那个反而靠右——先加按钮，用户才会先读到原因。
+            if f.fixable_by_config && secondary_button(ui, p, "去设置", true) {
+                state.page = crate::state::Page::Settings;
+            }
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("上次失败：{}", crate::app::short(&f.message, 34)))
+                        .size(p.sz(10.5))
+                        .color(p.danger),
+                )
+                .wrap_mode(egui::TextWrapMode::Truncate),
+            );
+        }
+    }
+    // 未配置时什么都不画：首页要回答的是「还剩多少、能清多少、点哪个」，
+    // 「AI 未配置」是设置页的事。这里挂一句尾巴，只会让人以为清理被挡住了。
+    let _ = busy;
+}
+
+/// 清单为空时的三种不同情况，各自说清是哪一种。
+fn empty_list(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    p: &Palette,
+    result: &crate::worker::ScanResult,
+) {
+    if !state.query.is_empty() {
+        state_block(
+            ui,
+            p,
+            "○",
+            "没有匹配的内容",
+            "换个关键词，或者清掉搜索框看全部。",
+            p.text_faint,
+        );
+        if secondary_button(ui, p, "清空搜索", true) {
+            state.query.clear();
+        }
+        return;
+    }
+
+    // 「全部受保护」是一种真实且常见的结果，不能画成「什么都没找到」
+    let kept = state.count_of(Priority::Keep);
+    if kept > 0 {
+        let bytes: u64 = result
+            .items
+            .iter()
+            .filter(|c| state.priority_of(c) == Priority::Keep)
+            .map(|c| c.alloc_bytes.max(c.bytes))
+            .sum();
+        card(ui, p, |ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("这一档里没有内容，扫到的都在「保留」里")
+                        .size(p.sz(14.0))
+                        .strong(),
+                )
+                .wrap_mode(egui::TextWrapMode::Wrap),
+            );
+            ui.add_space(3.0);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "{} 项、共 {}：都是你的记录、密钥或正在使用的内容，不会被移动。",
+                        kept,
+                        molt_scan::human_bytes(bytes)
+                    ))
+                    .size(p.sz(11.5))
+                    .color(p.text_dim),
+                )
+                .wrap_mode(egui::TextWrapMode::Wrap),
+            );
+            ui.add_space(8.0);
+            if secondary_button(ui, p, "看看这些是什么", true) {
+                state.filter = Filter::Protected;
+            }
+        });
+        return;
+    }
+
+    state_block(
+        ui,
+        p,
+        "○",
+        "这一档里没有内容",
+        "换一个分段看，或者重新扫描一次。",
+        p.text_faint,
+    );
 }
 
 /// 一行数据。返回是否被点击（由调用方统一改状态，避免同帧多次借用）。
@@ -716,30 +1070,51 @@ fn checkbox(ui: &mut egui::Ui, p: &Palette, checked: bool, actionable: bool, int
         if !actionable {
             // 一道斜杠：这条路不存在，不是「现在不能点」
             ui.painter().line_segment(
-                [rect.left_bottom() + egui::vec2(3.0, -3.0), rect.right_top() - egui::vec2(3.0, 3.0)],
+                [
+                    rect.left_bottom() + egui::vec2(3.0, -3.0),
+                    rect.right_top() - egui::vec2(3.0, 3.0),
+                ],
                 egui::Stroke::new(1.0, p.border),
             );
         }
     }
 }
 
-/// 底部操作条：主操作在最右，危险操作紧邻其左。
-fn footer(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
-    egui::Frame::NONE
-        .fill(p.bg)
-        .inner_margin(egui::Margin::symmetric(0, 6))
+/// 窗口底部固定操作条：**主操作不随清单滚动**。
+///
+/// 旧版把「清理这些」埋在首页那张大卡片中间，下面还接着 AI 条与几百行清单；
+/// 用户往下翻一眼清单，那个按钮就再也看不到了，只能往回滚。
+/// 清理工具里「选中 → 执行」是最常走的一步，它必须一直在手边。
+fn footer_bar(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
+    egui::Panel::bottom("workbench-actions")
+        .resizable(false)
+        .frame(
+            egui::Frame::NONE
+                .fill(p.surface)
+                .inner_margin(egui::Margin::symmetric(28, 10)),
+        )
         .show(ui, |ui| {
-            crate::widgets::hairline(ui, p);
             let n = state.checked_count();
-            let enabled = n > 0 && state.can_start();
-
+            let can = state.can_start();
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = p.sz(1.0);
                     if n == 0 {
-                        ui.label(
-                            egui::RichText::new("还没有选中任何项")
-                                .size(p.sz(12.0))
-                                .color(p.text_dim),
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("还没有选中任何项")
+                                    .size(p.sz(12.5))
+                                    .color(p.text_dim),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("在下面清单里点一行即可勾选")
+                                    .size(p.sz(10.5))
+                                    .color(p.text_faint),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
                         );
                     } else {
                         ui.add(
@@ -748,49 +1123,59 @@ fn footer(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                                     "已选 {n} 项 · {}",
                                     molt_scan::human_bytes(state.checked_bytes())
                                 ))
-                                .size(p.sz(13.0))
+                                .size(p.sz(14.0))
                                 .strong(),
                             )
                             .wrap_mode(egui::TextWrapMode::Extend),
                         );
-                        ui.label(
-                            egui::RichText::new("移入隔离区可还原；直接清理不可恢复")
-                                .size(p.sz(10.5))
-                                .color(p.text_faint),
-                        );
+                        // 筛选只影响「看到哪些行」，不影响勾选。当前筛选下看不见
+                        // 但已被勾中的那些必须说清，否则用户会以为自己只选了 3 个。
+                        let hidden = state.checked_outside_filter();
+                        if hidden > 0 {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!(
+                                        "其中 {hidden} 项在当前筛选之外（筛选不会取消勾选）"
+                                    ))
+                                    .size(p.sz(10.5))
+                                    .color(p.costly),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                        } else {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("放入临时空间，7 天内可还原")
+                                        .size(p.sz(10.5))
+                                        .color(p.text_faint),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                            );
+                        }
                     }
                 });
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 主操作：可还原
-                    if primary_button(ui, p, "移入隔离区", enabled) {
+                    if primary_button(ui, p, "清理这些（可还原）", n > 0 && can) {
                         state.pending_clean = state.pending_from_checked(CleanMode::Quarantine);
                     }
-                    ui.add_space(6.0);
-                    // 危险操作：不可恢复，红色描边，后面还有一道确认
-                    if danger_ghost_button(ui, p, "直接清理…", enabled) {
+                    // 不可恢复的路留在主按钮左边，且降一档：它需要用户主动去找，
+                    // 而不是和主按钮并排抢眼。
+                    if danger_ghost_button(ui, p, "直接清理…", n > 0 && can) {
                         state.pending_clean = state.pending_from_checked(CleanMode::Delete);
                     }
-                    ui.add_space(8.0);
                     if secondary_button(ui, p, "全不选", n > 0 && state.can_select()) {
                         state.clear_selection();
-                    }
-                    if secondary_button(ui, p, "全选本页", state.can_select()) {
-                        state.select_all_visible();
                     }
                 });
             });
 
             if state.activity().is_busy() {
-                ui.add_space(4.0);
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(format!(
-                            "{}——所有会冲突的操作都暂时停用，完成后自动恢复。",
-                            state.activity().blocking_hint()
-                        ))
-                        .size(p.sz(10.5))
-                        .color(p.costly),
+                        egui::RichText::new(state.activity().blocking_hint())
+                            .size(p.sz(10.5))
+                            .color(p.costly),
                     )
                     .wrap_mode(egui::TextWrapMode::Wrap),
                 );
@@ -851,12 +1236,8 @@ fn failed_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette, err: &str) 
         );
         ui.add_space(3.0);
         ui.add(
-            egui::Label::new(
-                egui::RichText::new(err)
-                    .size(p.sz(12.0))
-                    .color(p.text_dim),
-            )
-            .wrap_mode(egui::TextWrapMode::Wrap),
+            egui::Label::new(egui::RichText::new(err).size(p.sz(12.0)).color(p.text_dim))
+                .wrap_mode(egui::TextWrapMode::Wrap),
         );
         ui.add_space(4.0);
         ui.label(
@@ -881,9 +1262,9 @@ pub fn confirm_modal(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
 
     let is_delete = pending.mode == CleanMode::Delete;
     let title = if is_delete {
-        "永久删除这些内容？"
+        "直接清理这些内容？"
     } else {
-        "把这些内容移入隔离区？"
+        "把这些内容放入临时空间？"
     };
     let accent = if is_delete { p.danger } else { p.reclaimable };
 
@@ -950,7 +1331,7 @@ pub fn confirm_modal(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(
-                                    "内容不会被放进隔离区，删掉之后没有任何找回的途径。",
+                                    "内容不会被放进临时空间，删掉之后没有任何找回的途径。",
                                 )
                                 .size(p.sz(11.5))
                                 .color(p.text_dim),
@@ -962,7 +1343,7 @@ pub fn confirm_modal(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(format!(
-                            "隔离区保留 {} 天，期间随时可以还原。可用空间不会立刻变多——文件只是被移走了。",
+                            "临时空间会保留 {} 天，期间随时可以还原。可用空间不会立刻变多——文件只是被移到了我们自己的临时空间里。",
                             crate::paths::DEFAULT_RETAIN_DAYS
                         ))
                         .size(p.sz(11.5))
@@ -978,9 +1359,9 @@ pub fn confirm_modal(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
             ui.add_space(18.0);
             ui.horizontal(|ui| {
                 let label = if is_delete {
-                    "确认永久删除"
+                    "确认直接清理"
                 } else {
-                    "确认移入隔离区"
+                    "确认放入临时空间"
                 };
                 let clicked = if is_delete {
                     danger_button(ui, p, label, true)
@@ -1045,9 +1426,7 @@ fn object_list(
                         if let Some(n) = &item.note {
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(n)
-                                        .size(p.sz(10.0))
-                                        .color(p.text_faint),
+                                    egui::RichText::new(n).size(p.sz(10.0)).color(p.text_faint),
                                 )
                                 .wrap_mode(egui::TextWrapMode::Wrap),
                             );
@@ -1194,7 +1573,14 @@ pub fn do_clean(state: &mut AppState) {
     let q = molt_act::Quarantine::new(crate::paths::quarantine_root(), batch);
 
     state.pending_clean = None;
-    state.status = Some(StatusMessage::info("正在清理…"));
+    // 不再往状态里塞「正在清理…」：进度已经由首页圆环自己表达，
+    // 再弹一个窗只会挡住那块正在动的环。
+    // 圆环要拿这两个数去写圆心（项数与体积），不能等结果报告回来才有数。
+    // 同时把动画清零：每批清理都是从 12 点开始重新长出来。
+    state.clean_total_items = selected.len();
+    state.clean_total_bytes = selected.iter().map(|c| c.alloc_bytes.max(c.bytes)).sum();
+    state.clean_anim = 0.0;
+    state.clean_done_secs = 0.0;
     state.clean_job = Some(crate::worker::CleanJob::start(
         selected,
         store,
@@ -1219,6 +1605,17 @@ pub fn pump_clean(state: &mut AppState) {
                 text: op.summary.clone(),
             });
             state.last_op = Some(Arc::new(op));
+            // 圆环跑满、满绿停 1.8 秒再回到磁盘读数：清完那一下要看得见。
+            state.clean_anim = 1.0;
+            state.clean_done_secs = 1.8;
+            // 「放入临时空间」不释放空间（只是 rename），圆心不能写成「已腾出」。
+            // 只有直接清理才是真的腾出来了；临时空间那批只报「移走了多少」。
+            state.clean_was_delete = report.mode == CleanMode::Delete;
+            state.clean_total_bytes = if state.clean_was_delete {
+                report.deleted_bytes
+            } else {
+                report.moved_bytes
+            };
             // 清完立刻重扫：清单里现在应该是清理后的真实状态
             crate::pages::workbench::start_scan(state);
             crate::pages::quarantine::reload(state);
@@ -1245,7 +1642,7 @@ fn report_to_op(report: &crate::worker::CleanReport) -> crate::state::OpReport {
             molt_scan::human_bytes(report.deleted_bytes)
         ),
         CleanMode::Quarantine => format!(
-            "已移入隔离区 {} 项，共 {}（{} 天内可还原）",
+            "已放入临时空间 {} 项，共 {}（{} 天内可还原）",
             report.moved,
             molt_scan::human_bytes(report.moved_bytes),
             crate::paths::DEFAULT_RETAIN_DAYS
@@ -1264,6 +1661,7 @@ fn report_to_op(report: &crate::worker::CleanReport) -> crate::state::OpReport {
             done_bytes: 0,
             failures: report.failures.clone(),
             kind: StatusKind::Error,
+            next: Some(crate::state::NextStep::Retry),
         };
     }
 
@@ -1274,14 +1672,22 @@ fn report_to_op(report: &crate::worker::CleanReport) -> crate::state::OpReport {
             done_bytes,
             failures: report.failures.clone(),
             kind: StatusKind::Warn,
+            next: Some(crate::state::NextStep::Retry),
         }
     } else {
+        // 做成之后把用户送到「刚移走的东西去哪了」——
+        // 移入隔离区的去隔离区，直接删的只能去历史看记录。
+        let next = match report.mode {
+            CleanMode::Quarantine => crate::state::NextStep::Quarantine,
+            CleanMode::Delete => crate::state::NextStep::History,
+        };
         crate::state::OpReport {
             summary,
             done,
             done_bytes,
             failures: Vec::new(),
             kind: StatusKind::Info,
+            next: Some(next),
         }
     }
 }
@@ -1328,7 +1734,9 @@ pub fn pump_ai(state: &mut AppState) {
                 let keep: std::collections::HashSet<String> = r
                     .items
                     .iter()
-                    .filter(|c| matches!(state.priority_of(c), Priority::Safe | Priority::Suggested))
+                    .filter(|c| {
+                        matches!(state.priority_of(c), Priority::Safe | Priority::Suggested)
+                    })
                     .map(|c| c.path.display().to_string())
                     .collect();
                 state.checked = keep;
@@ -1358,6 +1766,8 @@ pub fn pump_scan(state: &mut AppState) {
         crate::worker::Progress::Done(result) => {
             state.apply_result(result);
             state.refresh_disk();
+            // 记下这份结果的时刻：下次扫描失败时要用它说明「旧数据是哪来的」。
+            state.last_scan_at = Some(crate::paths::now_hhmm());
             if state.error.is_none() {
                 state.status = None;
             }
@@ -1401,6 +1811,151 @@ mod tests {
             }
         }
         dump
+    }
+
+    /// 首页必须是上下排：圆环在上、图例与按钮在下。
+    ///
+    /// 用画出来的 y 坐标验，而不是靠看图：宽窗口下曾经排成左右两栏，
+    /// 用户的视线要在环和按钮之间横跳。这条断言钉住「竖着读」这个要求。
+    #[test]
+    fn hero_stacks_ring_above_the_buttons() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        let mut state = state_with_notes();
+        // 宽窗口——旧版正是从这里开始分栏的
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 2200.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                show(ui, &mut state, &Palette::light());
+            });
+        });
+        out.textures_delta.clear();
+
+        let mut texts: Vec<(String, f32)> = Vec::new();
+        collect_text_pos(&out.shapes, &mut texts);
+
+        let y = |needle: &str| -> Option<f32> {
+            texts
+                .iter()
+                .find(|(t, _)| t.contains(needle))
+                .map(|(_, y)| *y)
+        };
+        let ring_y = y("还剩").expect("圆心要有「还剩」");
+        let legend_y = y("可清理").expect("要有可清理图例");
+        let button_y = y("放入临时空间").expect("要有清理主按钮");
+
+        assert!(
+            ring_y < legend_y,
+            "圆环要在图例上面：环 {ring_y}，图例 {legend_y}"
+        );
+        assert!(
+            legend_y < button_y,
+            "图例要在按钮上面：图例 {legend_y}，按钮 {button_y}"
+        );
+    }
+
+    fn collect_text_pos(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<(String, f32)>) {
+        for cs in shapes {
+            walk_text_pos(&cs.shape, out);
+        }
+    }
+
+    fn walk_text_pos(shape: &egui::epaint::Shape, out: &mut Vec<(String, f32)>) {
+        match shape {
+            egui::epaint::Shape::Text(t) => {
+                out.push((t.galley.text().to_string(), t.pos.y));
+            }
+            egui::epaint::Shape::Vec(v) => {
+                for s in v {
+                    walk_text_pos(s, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 清理进行中：环心必须写进度，环上必须有进度弧。
+    #[test]
+    fn cleaning_shows_progress_in_the_ring() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        let mut state = state_with_notes();
+        state.clean_anim = 0.46;
+        state.clean_total_items = 24;
+        state.clean_total_bytes = 3_600_000_000;
+
+        let dump = painted_text(&ctx, &mut state, &Palette::light());
+        assert!(
+            dump.iter().any(|l| l.contains("正在清理")),
+            "清理中圆心要写「正在清理」：{dump:#?}"
+        );
+        assert!(
+            dump.iter().any(|l| l.contains('%')),
+            "清理中圆心要写百分比，让用户看到它在动：{dump:#?}"
+        );
+        assert!(
+            dump.iter().any(|l| l.contains("24 项")),
+            "圆心要写这次一共清多少项：{dump:#?}"
+        );
+        // 清完之后不再显示「还剩」——那一格已经被结果占了
+        assert!(
+            !dump.iter().any(|l| l == "还剩"),
+            "清理中不该同时写「还剩」：{dump:#?}"
+        );
+    }
+
+    /// 清完那一刻：环心换成「清理完成」与腾出的量。
+    #[test]
+    fn finished_clean_announces_the_result() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        let mut state = state_with_notes();
+        state.clean_anim = 1.0;
+        state.clean_done_secs = 1.5;
+        state.clean_was_delete = true;
+        state.clean_total_bytes = 3_600_000_000;
+
+        let dump = painted_text(&ctx, &mut state, &Palette::light());
+        assert!(
+            dump.iter().any(|l| l.contains("清理完成")),
+            "清完要明说完成：{dump:#?}"
+        );
+        assert!(
+            dump.iter().any(|l| l.contains("已腾出空间")),
+            "直接清理要说明腾出了空间：{dump:#?}"
+        );
+    }
+
+    /// 放进临时空间只是换了个位置，磁盘可用空间没变——不能写「已腾出空间」。
+    #[test]
+    fn quarantine_run_does_not_claim_freed_space() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        let mut state = state_with_notes();
+        state.clean_anim = 1.0;
+        state.clean_done_secs = 1.5;
+        state.clean_was_delete = false;
+        state.clean_total_bytes = 3_600_000_000;
+
+        let dump = painted_text(&ctx, &mut state, &Palette::light());
+        assert!(
+            !dump.iter().any(|l| l.contains("已腾出空间")),
+            "放入临时空间没有释放空间，不能说腾出了空间：{dump:#?}"
+        );
+        assert!(
+            dump.iter().any(|l| l.contains("已放进临时空间")),
+            "要说明东西去了临时空间：{dump:#?}"
+        );
     }
 
     fn collect_text(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
@@ -1457,19 +2012,47 @@ mod tests {
         crate::theme::install_fonts(&ctx);
         crate::theme::Theme::install(&ctx);
         let mut state = state_with_notes();
-        let dump = painted_text(&ctx, &mut state, &Palette::light());
+        let mut dump = painted_text(&ctx, &mut state, &Palette::light());
 
+        // 首屏是仪表盘，不是清单。三件事必须一眼都在：
+        // 还剩多少（圆心）、能清多少（图例 + 按钮）、下一步点哪（大按钮）。
         assert!(
-            dump.iter().any(|l| l.contains("建议清理")),
-            "必须有一档写清「建议清理」：{dump:#?}"
+            dump.iter().any(|l| l.contains("还剩")),
+            "圆心要写清还剩多少：{dump:#?}"
         );
         assert!(
-            dump.iter().any(|l| l.contains("可以安全清理")),
+            dump.iter().any(|l| l.contains("可清理")),
+            "图例要有可清理那一档：{dump:#?}"
+        );
+        assert!(
+            dump.iter().any(|l| l.contains("放入临时空间")),
+            "首页的主操作要直接写出能清多少：{dump:#?}"
+        );
+        assert!(
+            dump.iter().any(|l| l.contains("7 天可还原")),
+            "主按钮必须说清可还原：{dump:#?}"
+        );
+        // 两种清理方式必须同时出现：能反悔的那条，和真的腾出空间的那条。
+        assert!(
+            dump.iter().any(|l| l.contains("直接清理掉")),
+            "首页要同时给出直接清理：{dump:#?}"
+        );
+        // 清单默认收起，所以条目本身此时不该出现。
+        assert!(
+            !dump.iter().any(|l| l.contains("cargo build 的输出目录")),
+            "首屏不该铺开清单：{dump:#?}"
+        );
+
+        // 点开之后才是分档清单。
+        state.list_expanded = true;
+        dump = painted_text(&ctx, &mut state, &Palette::light());
+        assert!(
+            dump.iter().any(|l| l.contains("建议清掉")),
+            "必须有一档写清「建议清掉」：{dump:#?}"
+        );
+        assert!(
+            dump.iter().any(|l| l.contains("可以直接清")),
             "必须有可回收那一段：{dump:#?}"
-        );
-        assert!(
-            dump.iter().any(|l| l.contains("可以先清")),
-            "顶部要给出「现在可以做什么」：{dump:#?}"
         );
         // AI 解释必须挂在条目上，而不是藏在另一页
         assert!(
@@ -1488,6 +2071,7 @@ mod tests {
         crate::theme::install_fonts(&ctx);
         crate::theme::Theme::install(&ctx);
         let mut state = state_with_notes();
+        state.list_expanded = true;
         let dump = painted_text(&ctx, &mut state, &Palette::light());
         assert!(
             dump.iter().any(|l| l.contains("重新编译")),
@@ -1507,6 +2091,99 @@ mod tests {
         let (n, _) = state.reclaimable_summary();
         let (sug, _) = state.suggested_summary();
         assert_eq!(n + sug, state.checked_count(), "顶部数字必须与勾选数一致");
+    }
+
+    #[test]
+    fn stale_result_is_labelled_as_stale() {
+        // 重扫失败但旧结果还在：数字保留，但必须先说清它是旧的。
+        // 不说的话，用户会把 10:42 那份当成刚刚扫出来的。
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        let mut state = state_with_notes();
+        state.last_scan_at = Some("10:42".into());
+        state.error = Some("遍历 ~/Library/Caches 时被系统拒绝".into());
+
+        let dump = painted_text(&ctx, &mut state, &Palette::light());
+        assert!(
+            dump.iter().any(|l| l.contains("这次扫描失败")),
+            "失败要写在最上面：{dump:#?}"
+        );
+        assert!(
+            dump.iter().any(|l| l.contains("10:42")),
+            "要说清下面这份是什么时候的结果：{dump:#?}"
+        );
+        assert!(
+            dump.iter().any(|l| l.contains("重试")),
+            "失败必须给一个可点的下一步：{dump:#?}"
+        );
+    }
+
+    #[test]
+    fn freed_bytes_are_shown_once_something_was_cleaned() {
+        // session_freed 一直在累加，但从没显示过；清完用户没有任何持久证据。
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        let mut state = state_with_notes();
+        state.session_freed = 1_240_000_000;
+        let dump = painted_text(&ctx, &mut state, &Palette::light());
+        assert!(
+            dump.iter().any(|l| l.contains("本次运行已腾出")),
+            "清完要说清腾出了多少：{dump:#?}"
+        );
+    }
+
+    #[test]
+    fn filtered_view_always_offers_a_way_back() {
+        // hero 里的两个链接会切筛选；切过去之后必须有一条回到「全部」的路。
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        let mut state = state_with_notes();
+        state.filter = Filter::Costly;
+        state.list_expanded = true;
+        let dump = painted_text(&ctx, &mut state, &Palette::light());
+        assert!(
+            dump.iter().any(|l| l.contains("显示全部")),
+            "筛到某一档后要有出口：{dump:#?}"
+        );
+    }
+
+    #[test]
+    fn unconfigured_ai_offers_a_way_to_configure_it() {
+        // 未配置时以前只显示 resolve() 报错的最后 30 个字——
+        // 用户看到的是「…API_KEY，或在配置里填写 api_key」这种半句，
+        // 既不知道怎么读，也没有一条去配置页的路。
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        let mut state = state_with_notes();
+        state.ai.config.active_provider.clear();
+        state.ai.config.active_model.clear();
+
+        // 首页不再挂「AI 未配置」的尾巴：那不是清理的必要条件，
+        // 挂在首页只会让人以为主流程被挡住了。首页必须照常给出清理入口。
+        let dump = painted_text(&ctx, &mut state, &Palette::light());
+        assert!(
+            dump.iter().any(|l| l.contains("放入临时空间")),
+            "没配 AI 也要能清理：{dump:#?}"
+        );
+        assert!(
+            !dump.iter().any(|l| l.contains("未配置")),
+            "首页不该提 AI 配置：{dump:#?}"
+        );
+
+        // 但「让 AI 解释」这个入口仍然在清单里，只是点不动——
+        // 用户想知道为什么点不了时，设置页有密钥输入框。
+        state.list_expanded = true;
+        let dump = painted_text(&ctx, &mut state, &Palette::light());
+        // 这份 state 里已经有解释，按钮因此写「重新解释」——两种文案都算入口在。
+        assert!(
+            dump.iter()
+                .any(|l| l.contains("解释") && l.contains("AI") || l == "重新解释"),
+            "清单里要保留 AI 解释入口：{dump:#?}"
+        );
     }
 
     #[test]

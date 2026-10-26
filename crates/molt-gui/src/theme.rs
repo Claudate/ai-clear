@@ -50,6 +50,11 @@ pub struct Palette {
     pub costly_soft: egui::Color32,
     /// 受保护——刻意用灰而不是红
     pub protected: egui::Color32,
+    /// 磁盘饼图里「已用、但清不掉」那一段。
+    ///
+    /// 它既不是「能清」（绿）也不是「你的记录」（浅灰），必须是第三档中性色，
+    /// 否则饼图会被读成「一大块都是能清的」或「一大块都是我的文件」。
+    pub used_bar: egui::Color32,
     /// 危险 / 失败 / 空间告急。只在「必须马上看」的地方用，
     /// 不能拿它当普通强调——满屏红会让真正危险的那条也被忽略。
     pub danger: egui::Color32,
@@ -85,6 +90,7 @@ impl Palette {
             costly: egui::Color32::from_rgb(151, 88, 13),
             costly_soft: egui::Color32::from_rgb(249, 242, 231),
             protected: egui::Color32::from_rgb(136, 143, 139),
+            used_bar: egui::Color32::from_rgb(95, 107, 102),
             danger: egui::Color32::from_rgb(177, 52, 43),
             danger_soft: egui::Color32::from_rgb(250, 238, 236),
             scale: 1.0,
@@ -107,6 +113,7 @@ impl Palette {
             costly: egui::Color32::from_rgb(222, 163, 92),
             costly_soft: egui::Color32::from_rgb(46, 38, 26),
             protected: egui::Color32::from_rgb(139, 147, 143),
+            used_bar: egui::Color32::from_rgb(124, 138, 133),
             danger: egui::Color32::from_rgb(232, 123, 112),
             danger_soft: egui::Color32::from_rgb(48, 30, 28),
             scale: 1.0,
@@ -165,7 +172,7 @@ impl Palette {
 pub struct Theme {
     pub mode: Mode,
     pub palette: Palette,
-    /// 字号缩放。1.0 是标准档，默认走 [`Theme::DEFAULT_SCALE`]（大字号）。
+    /// 字号缩放。固定走 [`Theme::DEFAULT_SCALE`]（大字号）。
     pub scale: f32,
     /// 是否跟随系统外观。
     ///
@@ -176,28 +183,12 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// 两档字号：标准与大字号。
+    /// 唯一档位：**大字号**。
     ///
-    /// 只给两档而不是滑条：这款工具的使用场景是偶尔清理一次，
-    /// 中间档位没人会去拖。两档能覆盖「看得清」和「放很大」两个真实需求。
-    pub const SCALES: [f32; 2] = [1.0, 1.4];
-
-    /// 默认档位：**大字号**。
-    ///
-    /// 用户的显示器与视距下标准档偏小（12 号字在 27 寸屏上要凑近看），
-    /// 而这款工具的门槛恰恰是「一眼看清这一项是什么、删了会怎样」，
-    /// 所以打开就该是能直接读的尺寸，要更紧凑再手动切回标准档。
+    /// 字号切换（标准字号/放大字号）已按用户要求移除，界面固定用这一档。
+    /// 这款工具的门槛恰恰是「一眼看清这一项是什么、删了会怎样」，
+    /// 所以字号直接落在大字号，不给用户切小的入口。
     pub const DEFAULT_SCALE: f32 = 1.4;
-
-    /// 切到下一档字号。返回新值，调用方据此重装样式。
-    pub fn cycle_scale(&mut self) -> f32 {
-        let idx = Self::SCALES
-            .iter()
-            .position(|s| (*s - self.scale).abs() < 0.01)
-            .unwrap_or(0);
-        self.scale = Self::SCALES[(idx + 1) % Self::SCALES.len()];
-        self.scale
-    }
 
     /// 安装主题并返回当前状态。两套样式都装，之后跟随系统切换。
     pub fn install(ctx: &egui::Context) -> Self {
@@ -237,13 +228,6 @@ impl Theme {
             self.palette = Palette::of(mode).with_scale(self.scale);
             self.apply_all(ctx);
         }
-    }
-
-    /// 切换字号档位并重装样式。
-    pub fn toggle_scale(&mut self, ctx: &egui::Context) {
-        self.cycle_scale();
-        self.palette = Palette::of(self.mode).with_scale(self.scale);
-        self.apply_all(ctx);
     }
 }
 

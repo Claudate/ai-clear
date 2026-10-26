@@ -129,7 +129,10 @@ impl Explanation {
     pub fn line(&self) -> Option<String> {
         let purpose = self.purpose.trim();
         let reason = self.reason.trim();
-        let parts: Vec<&str> = [purpose, reason].into_iter().filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&str> = [purpose, reason]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect();
         if parts.is_empty() {
             None
         } else {

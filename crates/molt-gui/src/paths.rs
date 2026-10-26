@@ -24,6 +24,19 @@ pub fn display_in(home: &str, path: &std::path::Path) -> String {
     molt_act::paths::display_in(home, path)
 }
 
+/// 现在这一刻，只取 `HH:MM`。
+///
+/// 界面上「这份结果是什么时候的」只需要时分：同一天内的先后关系足以判断
+/// 新鲜度，写上年月日反而更长且没人读。
+pub fn now_hhmm() -> String {
+    let iso = molt_act::now_iso8601();
+    if iso.len() >= 16 {
+        iso[11..16].to_string()
+    } else {
+        iso
+    }
+}
+
 /// 缩写一个字符串路径。用于后台任务回报的、已经没有 `home` 上下文的路径。
 pub fn display_path_str(path: &str) -> String {
     molt_act::paths::display_path(std::path::Path::new(path))

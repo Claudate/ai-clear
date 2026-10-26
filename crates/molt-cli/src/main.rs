@@ -18,7 +18,7 @@ use std::io::{IsTerminal, Write};
 #[command(
     name = "molt",
     version,
-    about = "蜕好，就好。AI 与开发工具的缓存清理器"
+    about = "净灵 · Cleanling —— AI 与开发工具的缓存清理器"
 )]
 struct Cli {
     #[command(subcommand)]

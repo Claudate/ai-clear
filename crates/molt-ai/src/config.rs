@@ -381,8 +381,14 @@ impl Default for AiConfig {
 /// 而配置是只读的偏好；让 `molt-ai` 为一条路径依赖整个写盘层（含 rusqlite）
 /// 不划算，也让「AI 层不写盘」这条承诺变得含糊。
 pub fn default_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
+    // `MOLT_HOME` 优先，和 `molt-act::paths::home_dir` 用同一套规则：
+    // 它的作用是「把整份数据指到一个假家目录」，端到端验证靠它才不会
+    // 把测试写进真实的 `~/.config/molt/ai.toml`。这里各算各的，就会
+    // 出现「清理在假 home、配置在真 home」这种半截隔离，而配置里放的是密钥。
+    let home = std::env::var_os("MOLT_HOME")
         .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/"));
     home.join(".config").join("molt").join("ai.toml")
 }

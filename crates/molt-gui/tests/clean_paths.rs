@@ -125,14 +125,14 @@ fn both_clean_paths_run_for_real_in_a_fake_home() {
     wait_clean(&mut state);
 
     // 原位置已空，构建产物还在
-    assert!(!qa.exists(), "移入隔离区后原位置应为空");
+    assert!(!qa.exists(), "放入临时空间后原位置应为空");
     assert!(!qb.exists());
     assert!(del.exists(), "没选中的项必须原地不动");
 
-    // 结果反馈：说清是移入隔离区，且不说「释放」
+    // 结果反馈：说清是放入临时空间，且不说「释放」
     let op = state.last_op.as_ref().expect("应有结果报告");
     assert_eq!(op.kind, StatusKind::Info, "全部成功应是 Info");
-    assert!(op.summary.contains("移入隔离区"), "实际：{}", op.summary);
+    assert!(op.summary.contains("放入临时空间"), "实际：{}", op.summary);
     assert!(
         !op.summary.contains("释放"),
         "隔离不释放空间：{}",

@@ -33,6 +33,7 @@ pub fn ensure_loaded(state: &mut AppState) {
                 }
             }
             state.auto.config = cfg;
+            state.auto.draft = Some(state.auto.config.clone());
             state.auto.error = None;
         }
         Err(e) => state.auto.error = Some(e),
@@ -44,6 +45,9 @@ pub fn ensure_loaded(state: &mut AppState) {
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     ensure_loaded(state);
+
+    // 保存条固定在底部：改动后不管滚到哪里都能看见「有一份没保存」。
+    save_bar(ui, state, p);
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -140,21 +144,22 @@ fn status_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
 
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            let enabled = state.can_start() && !state.auto.saving;
-            if primary_button(ui, p, if cfg.enabled { "保存并启用" } else { "保存" }, enabled) {
-                save(state, cfg.enabled);
-            }
-            if cfg.enabled && danger_ghost_button(ui, p, "关闭并卸载", enabled) {
-                let mut off = cfg.clone();
-                off.enabled = false;
-                save(state, false);
-                let _ = off;
-            }
-            if secondary_button(ui, p, "刷新状态", enabled) {
+            // 保存与开关都在底部那条固定的保存条上。这里只留一个「重新查询」：
+            // 同一个页面里出现两处「保存」，用户没法判断哪个才是真的。
+            if secondary_button(ui, p, "刷新状态", !state.auto.saving) {
                 state.auto.installed = Some(schedule::is_loaded());
                 state.auto.last_run = schedule::load_last_run();
             }
-            if state.is_busy() {
+            if state.auto.saving {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("正在保存…")
+                            .size(p.sz(10.5))
+                            .color(p.text_dim),
+                    )
+                    .wrap_mode(egui::TextWrapMode::Extend),
+                );
+            } else if state.is_busy() {
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(state.activity().blocking_hint())
@@ -168,11 +173,121 @@ fn status_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     });
 }
 
+/// 底部保存条：有改动才显形，没改动时只报当前生效的那份。
+fn save_bar(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
+    let dirty = state.auto.dirty();
+    egui::Panel::bottom("automation-save")
+        .resizable(false)
+        .frame(
+            egui::Frame::NONE
+                .fill(p.surface)
+                .inner_margin(egui::Margin::symmetric(28, 10)),
+        )
+        .show(ui, |ui| {
+            let cfg = state.auto.editing().clone();
+            let can = state.can_start() && !state.auto.saving;
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = p.sz(1.0);
+                    if dirty {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("有未保存的更改")
+                                    .size(p.sz(13.0))
+                                    .strong()
+                                    .color(p.costly),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("保存后才会生效：{}", cfg.describe()))
+                                    .size(p.sz(10.5))
+                                    .color(p.text_faint),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Wrap),
+                        );
+                    } else if state.auto.config.enabled {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!(
+                                    "已按这个时间在跑：{}",
+                                    cfg.describe()
+                                ))
+                                .size(p.sz(12.5))
+                                .color(p.text_dim),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    } else {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new("自动清理现在是关闭的")
+                                    .size(p.sz(12.5))
+                                    .color(p.text_dim),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    }
+                    if cfg.rule_ids.is_empty() {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(
+                                    "还没有选中任何类型——这样启用后到点什么也不会清",
+                                )
+                                .size(p.sz(10.5))
+                                .color(p.costly),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Wrap),
+                        );
+                    }
+                });
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // 按钮文案说的是「按下会发生什么」。已经启用、只是改了时间，
+                    // 再写「保存并启用」会让人以为它会重新启用一遍或者覆盖别的东西。
+                    let primary_label = match (state.auto.config.enabled, dirty) {
+                        (false, _) => "保存并启用",
+                        (true, true) => "保存更改",
+                        (true, false) => "保存",
+                    };
+                    if primary_button(
+                        ui,
+                        p,
+                        primary_label,
+                        can && (dirty || !state.auto.config.enabled),
+                    ) {
+                        save(state, true);
+                    }
+                    if dirty && secondary_button(ui, p, "放弃更改", can) {
+                        state.auto.draft = Some(state.auto.config.clone());
+                    }
+                    if state.auto.config.enabled && danger_ghost_button(ui, p, "关闭并卸载", can)
+                    {
+                        save(state, false);
+                    }
+                });
+            });
+        });
+}
+
+/// 把草稿落盘（并可选地启用 / 卸载 launchd）。
+///
+/// 这是本页唯一会写盘的地方。之前时间与类型格子改一下就落盘，
+/// 于是同一个页面有两套保存语义：拨一下时间已经生效、勾一下类型也已经生效，
+/// 而「保存并启用」又像是一道额外的关口——用户没法判断自己改的东西到底守住没有。
 fn save(state: &mut AppState, enable: bool) {
-    let mut cfg = state.auto.config.clone();
+    let mut cfg = state
+        .auto
+        .draft
+        .clone()
+        .unwrap_or_else(|| state.auto.config.clone());
     cfg.enabled = enable;
 
+    state.auto.saving = true;
+
     if let Err(e) = schedule::save_config(&cfg) {
+        state.auto.saving = false;
         state.auto.error = Some(e.clone());
         state.status = Some(StatusMessage::error(format!("保存定时配置失败：{e}")));
         return;
@@ -182,10 +297,12 @@ fn save(state: &mut AppState, enable: bool) {
         // 0 个类型时启用是没意义的：到点会跑一次、什么都不清，
         // 用户第二天看到「已执行」会以为清理生效了
         if cfg.rule_ids.is_empty() {
+            state.auto.saving = false;
             state.status = Some(StatusMessage::warn(
                 "还没有选中任何类型，已保存但不会安装任务——先勾选要清理的类型",
             ));
-            state.auto.config = cfg;
+            state.auto.config = cfg.clone();
+            state.auto.draft = Some(cfg);
             return;
         }
         match schedule::install(&cfg) {
@@ -215,12 +332,22 @@ fn save(state: &mut AppState, enable: bool) {
             }
         }
     }
-    state.auto.config = cfg;
+
+    state.auto.saving = false;
+    // 落盘成功与否都要让「生效的那份」与草稿重新对齐：
+    // 失败时草稿留着，用户还能重试，而不是白改一遍。
+    if state.auto.error.is_none() {
+        state.auto.config = cfg.clone();
+        state.auto.draft = Some(cfg);
+    } else {
+        state.auto.config = cfg;
+        state.auto.draft = Some(state.auto.config.clone());
+    }
 }
 
-/// 频率与时间。
+/// 频率与时间。改动只进草稿，底部「保存」才落地。
 fn schedule_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
-    let mut cfg = state.auto.config.clone();
+    let mut cfg = state.auto.editing().clone();
     let mut changed = false;
 
     card(ui, p, |ui| {
@@ -294,19 +421,7 @@ fn schedule_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     });
 
     if changed {
-        state.auto.config = cfg;
-        // 改时间后若已启用，立即重装：只改文件不重装的话，
-        // 系统里跑的还是旧时间，而界面显示的是新时间
-        if state.auto.config.enabled && state.can_start() {
-            if let Err(e) = schedule::save_config(&state.auto.config) {
-                state.auto.error = Some(e);
-            } else if let Err(e) = schedule::install(&state.auto.config) {
-                state.auto.error = Some(e.clone());
-                state.status = Some(StatusMessage::error(format!("重装定时任务失败：{e}")));
-            } else {
-                state.auto.installed = Some(true);
-            }
-        }
+        state.auto.draft = Some(cfg);
     }
 }
 
@@ -317,16 +432,12 @@ fn kinds_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
         .as_ref()
         .map(schedule::kinds)
         .unwrap_or_default();
-    let mut cfg = state.auto.config.clone();
+    let mut cfg = state.auto.editing().clone();
     let mut changed = false;
 
     card(ui, p, |ui| {
         ui.horizontal_wrapped(|ui| {
-            ui.label(
-                egui::RichText::new("清哪些类型")
-                    .size(p.sz(13.5))
-                    .strong(),
-            );
+            ui.label(egui::RichText::new("清哪些类型").size(p.sz(13.5)).strong());
             ui.add(
                 egui::Label::new(
                     egui::RichText::new("只列出规则里标了「可自动清理」且删了能自动重建的类型")
@@ -378,10 +489,7 @@ fn kinds_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
             }
             let mut on = cfg.is_selected(&k.rule_id);
             if ui
-                .checkbox(
-                    &mut on,
-                    egui::RichText::new(&k.what).size(p.sz(11.5)),
-                )
+                .checkbox(&mut on, egui::RichText::new(&k.what).size(p.sz(11.5)))
                 .changed()
             {
                 if on && !cfg.is_selected(&k.rule_id) {
@@ -395,15 +503,10 @@ fn kinds_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     });
 
     if changed {
-        state.auto.config = cfg;
-        // 已启用时把选择立刻落盘：否则用户勾完以为生效了，
-        // 夜里那次跑的还是上一份选择
-        if state.auto.config.enabled {
-            if let Err(e) = schedule::save_config(&state.auto.config) {
-                state.auto.error = Some(e.clone());
-                state.status = Some(StatusMessage::error(format!("保存失败：{e}")));
-            }
-        }
+        // 选择也只进草稿。之前这里在已启用时立即落盘，
+        // 于是「勾一下就已经生效」、「拨一下时间也已经生效」，
+        // 而底部的「保存」又像是一道额外的关口——同一页两套语义。
+        state.auto.draft = Some(cfg);
     }
 }
 
@@ -411,11 +514,7 @@ fn kinds_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
 fn last_run_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     card(ui, p, |ui| {
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("上次执行")
-                    .size(p.sz(13.5))
-                    .strong(),
-            );
+            ui.label(egui::RichText::new("上次执行").size(p.sz(13.5)).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if secondary_button(ui, p, "刷新", true) {
                     state.auto.last_run = schedule::load_last_run();
@@ -496,10 +595,8 @@ fn last_run_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                         .wrap_mode(egui::TextWrapMode::Truncate),
                     );
                     ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(why).size(p.sz(10.0)).color(p.costly),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Wrap),
+                        egui::Label::new(egui::RichText::new(why).size(p.sz(10.0)).color(p.costly))
+                            .wrap_mode(egui::TextWrapMode::Wrap),
                     );
                 });
             }
@@ -537,7 +634,9 @@ fn run_now(state: &mut AppState) {
     };
     let cfg = state.auto.config.clone();
     if cfg.rule_ids.is_empty() {
-        state.status = Some(StatusMessage::warn("还没有选中任何类型，试跑不会清理任何内容"));
+        state.status = Some(StatusMessage::warn(
+            "还没有选中任何类型，试跑不会清理任何内容",
+        ));
     }
     state.status = Some(StatusMessage::info("正在执行定时清理…"));
     state.schedule_job = Some(crate::schedule::ScheduleJob::start(
@@ -577,5 +676,53 @@ pub fn pump(state: &mut AppState) {
             state.schedule_job = None;
         }
         None => {}
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schedule::{Frequency, ScheduleConfig};
+
+    fn baseline() -> ScheduleConfig {
+        ScheduleConfig {
+            enabled: true,
+            frequency: Frequency::Daily,
+            hour: 3,
+            minute: 30,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn editing_the_draft_does_not_touch_the_live_config() {
+        let mut state = AppState::new("/Users/me".into());
+        let base = baseline();
+        state.auto.config = base.clone();
+        state.auto.draft = Some(base.clone());
+        assert!(!state.auto.dirty());
+
+        // 用户拨了一下时间：只有草稿变
+        let mut d = base.clone();
+        d.hour = 9;
+        state.auto.draft = Some(d);
+        assert!(state.auto.dirty());
+        // 生效的那份（也就是夜里真会跑的那份）还是 3:30
+        assert_eq!(state.auto.config.hour, 3);
+        assert_eq!(state.auto.editing().hour, 9);
+    }
+
+    #[test]
+    fn discarding_the_draft_returns_to_the_live_config() {
+        let mut state = AppState::new("/Users/me".into());
+        let base = baseline();
+        state.auto.config = base.clone();
+        let mut d = base.clone();
+        d.minute = 5;
+        state.auto.draft = Some(d);
+        assert!(state.auto.dirty());
+
+        state.auto.draft = Some(state.auto.config.clone());
+        assert!(!state.auto.dirty());
+        assert_eq!(state.auto.editing().minute, 30);
     }
 }

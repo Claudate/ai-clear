@@ -1,4 +1,4 @@
-//! `molt-gui`：给「蜕」做的一个原生窗口。
+//! `molt-gui`：给「净灵 · Cleanling」做的一个原生窗口。
 //!
 //! 它**不做任何判定**。扫描、判定、清理全部复用 `molt-core` / `molt-scan` /
 //! `molt-act` 里已经存在并测过的那一套——GUI 只是同一份逻辑的另一个入口。
@@ -29,7 +29,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("蜕 · Molt")
+            .with_title("净灵 · Cleanling")
             .with_inner_size([1120.0, 800.0])
             .with_min_inner_size([720.0, 520.0]),
         ..Default::default()

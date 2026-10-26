@@ -41,9 +41,7 @@ impl Frequency {
 pub const LABEL: &str = "app.molt.schedule";
 
 /// 星期名。`0` 是周日，与 launchd 的 `Weekday` 一致。
-pub const WEEKDAY_NAMES: [&str; 7] = [
-    "周日", "周一", "周二", "周三", "周四", "周五", "周六",
-];
+pub const WEEKDAY_NAMES: [&str; 7] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduleConfig {
@@ -207,14 +205,7 @@ pub fn kinds(rules: &molt_core::RuleSet) -> Vec<ScheduleKind> {
 
 /// 分组只影响界面上的排列，不影响任何判定。
 fn group_of(rule_id: &str) -> &'static str {
-    const AI: [&str; 6] = [
-        "codex",
-        "claude",
-        "cursor",
-        "vscode",
-        "other-ai",
-        "ai",
-    ];
+    const AI: [&str; 6] = ["codex", "claude", "cursor", "vscode", "other-ai", "ai"];
     const DEV: [&str; 8] = [
         "npm", "pnpm", "cargo", "go", "py", "gradle", "wrangler", "swift",
     ];
@@ -347,7 +338,11 @@ pub fn install(cfg: &ScheduleConfig) -> Result<(), String> {
         .status();
 
     let out = std::process::Command::new("launchctl")
-        .args(["bootstrap", &format!("gui/{}", uid()), &path.display().to_string()])
+        .args([
+            "bootstrap",
+            &format!("gui/{}", uid()),
+            &path.display().to_string(),
+        ])
         .output()
         .map_err(|e| format!("调用 launchctl 失败：{e}"))?;
     if !out.status.success() {
@@ -414,7 +409,12 @@ pub fn run_once(rules: &molt_core::RuleSet, home: &str, cfg: &ScheduleConfig) ->
         .items
         .iter()
         .filter(|c| matches!(c.verdict, molt_core::Verdict::Reclaimable))
-        .filter(|c| c.rule_id.as_deref().map(|id| selected.iter().any(|s| s == id)).unwrap_or(false))
+        .filter(|c| {
+            c.rule_id
+                .as_deref()
+                .map(|id| selected.iter().any(|s| s == id))
+                .unwrap_or(false)
+        })
         .cloned()
         .collect();
 
@@ -462,13 +462,13 @@ pub fn run_once(rules: &molt_core::RuleSet, home: &str, cfg: &ScheduleConfig) ->
         )
     } else if run.failures.is_empty() {
         format!(
-            "已移入隔离区 {} 项，共 {}",
+            "已放入临时空间 {} 项，共 {}",
             run.done,
             molt_scan::human_bytes(run.bytes)
         )
     } else {
         format!(
-            "已移入隔离区 {} 项，共 {}；{} 项未处理",
+            "已放入临时空间 {} 项，共 {}；{} 项未处理",
             run.done,
             molt_scan::human_bytes(run.bytes),
             run.failures.len()
@@ -601,7 +601,10 @@ mod tests {
     #[test]
     fn daily_plist_has_no_weekday() {
         // 写成 Weekday=0 就变成「只在周日跑」，而用户以为是每天
-        let text = plist(Path::new("/Applications/Molt.app/Contents/MacOS/molt-gui"), &cfg_daily());
+        let text = plist(
+            Path::new("/Applications/Molt.app/Contents/MacOS/molt-gui"),
+            &cfg_daily(),
+        );
         assert!(!text.contains("<key>Weekday</key>"), "每天不能带 Weekday");
         assert!(text.contains("<integer>3</integer>"));
         assert!(text.contains("<integer>30</integer>"));
@@ -633,7 +636,11 @@ mod tests {
             .output();
         std::fs::remove_dir_all(&dir).ok();
         if let Ok(o) = out {
-            assert!(o.status.success(), "plist 不合法：{:?}", String::from_utf8_lossy(&o.stdout));
+            assert!(
+                o.status.success(),
+                "plist 不合法：{:?}",
+                String::from_utf8_lossy(&o.stdout)
+            );
         }
     }
 
@@ -724,7 +731,7 @@ verdict = { type = "costly", cost = "recompile", note = "重编" }
             done: 4,
             bytes: 1024,
             failures: vec![("/x".into(), "占用中".into())],
-            message: "已移入隔离区 4 项".into(),
+            message: "已放入临时空间 4 项".into(),
         };
         let text = serde_json::to_string(&run).unwrap();
         let back: LastRun = serde_json::from_str(&text).unwrap();

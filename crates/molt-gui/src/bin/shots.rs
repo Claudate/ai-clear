@@ -45,8 +45,12 @@ struct Case {
     page: Page,
     mode: Mode,
     setup: fn(&mut AppState),
-    big_font: bool,
 }
+
+/// 窄窗要看的不是「好不好看」，而是会不会把按钮挤出屏幕、
+/// 或者把一行数字括成两层。尺寸按小尺寸笔记本的可视区域取。
+const NARROW: &[&str] = &["18-narrow-workbench", "27-narrow-status-modal"];
+const NARROW_SIZE: [f32; 2] = [760.0, 640.0];
 
 struct Shots {
     out: std::path::PathBuf,
@@ -58,7 +62,6 @@ struct Shots {
     /// 截图回调是否已写盘
     saved: Arc<AtomicBool>,
     app: Option<molt_gui::MoltApp>,
-    scale: f32,
 }
 
 impl Shots {
@@ -69,126 +72,192 @@ impl Shots {
                 page: Page::Workbench,
                 mode: Mode::Light,
                 setup: with_data,
-                big_font: false,
+            },
+            // 读不到磁盘时不能画一条 0% 的环——那会被读成「盘是空的」。
+            Case {
+                name: "01a-workbench-no-disk",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: without_disk,
+            },
+            // 还没扫完：环照常画（磁盘数据不依赖扫描），但不说能清多少。
+            Case {
+                name: "01b-workbench-unsanned",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: disk_only,
             },
             Case {
                 name: "02-workbench-ai",
                 page: Page::Workbench,
                 mode: Mode::Light,
                 setup: with_ai_notes,
-                big_font: false,
             },
             Case {
                 name: "03-workbench-dark",
                 page: Page::Workbench,
                 mode: Mode::Dark,
                 setup: with_ai_notes,
-                big_font: false,
             },
             Case {
                 name: "04-workbench-loading",
                 page: Page::Workbench,
                 mode: Mode::Light,
                 setup: with_scanning,
-                big_font: false,
             },
             Case {
                 name: "05-workbench-empty",
                 page: Page::Workbench,
                 mode: Mode::Light,
                 setup: with_empty,
-                big_font: false,
             },
             Case {
                 name: "06-workbench-error",
                 page: Page::Workbench,
                 mode: Mode::Light,
                 setup: with_error,
-                big_font: false,
             },
             Case {
                 name: "07-workbench-protected",
                 page: Page::Workbench,
                 mode: Mode::Dark,
                 setup: with_protected,
-                big_font: false,
             },
             Case {
                 name: "08-workbench-busy",
                 page: Page::Workbench,
                 mode: Mode::Light,
                 setup: with_busy,
-                big_font: false,
             },
             Case {
                 name: "09-confirm-quarantine",
                 page: Page::Workbench,
                 mode: Mode::Light,
                 setup: with_pending_quarantine,
-                big_font: false,
             },
             Case {
                 name: "10-confirm-delete",
                 page: Page::Workbench,
                 mode: Mode::Light,
                 setup: with_pending_delete,
-                big_font: false,
-            },
-            Case {
-                name: "11-workbench-bigfont",
-                page: Page::Workbench,
-                mode: Mode::Light,
-                setup: with_ai_notes,
-                big_font: true,
             },
             Case {
                 name: "12-quarantine",
                 page: Page::Quarantine,
                 mode: Mode::Light,
                 setup: with_quarantine,
-                big_font: false,
             },
             Case {
                 name: "13-quarantine-empty",
                 page: Page::Quarantine,
                 mode: Mode::Light,
                 setup: with_quarantine_empty,
-                big_font: false,
             },
             Case {
                 name: "14-history",
                 page: Page::History,
                 mode: Mode::Light,
                 setup: with_history,
-                big_font: false,
+            },
+            Case {
+                name: "14b-history-filtered",
+                page: Page::History,
+                mode: Mode::Light,
+                setup: with_history_filtered,
             },
             Case {
                 name: "15-automation",
                 page: Page::Automation,
                 mode: Mode::Light,
                 setup: with_automation,
-                big_font: false,
+            },
+            Case {
+                name: "15b-automation-dirty",
+                page: Page::Automation,
+                mode: Mode::Light,
+                setup: with_automation_dirty,
             },
             Case {
                 name: "16-automation-never",
                 page: Page::Automation,
                 mode: Mode::Dark,
                 setup: with_automation_off,
-                big_font: false,
             },
             Case {
                 name: "17-settings",
                 page: Page::Settings,
                 mode: Mode::Light,
                 setup: with_settings,
-                big_font: false,
             },
             Case {
-                name: "18-settings-jev",
+                name: "17b-settings-advanced",
                 page: Page::Settings,
                 mode: Mode::Light,
-                setup: with_settings_inspect,
-                big_font: false,
+                setup: with_settings_advanced,
+            },
+            Case {
+                name: "18-narrow-workbench",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_data,
+            },
+            Case {
+                name: "19-workbench-freed",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_freed,
+            },
+            Case {
+                name: "20-workbench-stale",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_stale,
+            },
+            Case {
+                name: "21-workbench-ai-unset",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_ai_unset,
+            },
+            Case {
+                name: "22-workbench-ai-failed",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_ai_failed,
+            },
+            Case {
+                name: "23-workbench-filtered",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_costly_filter,
+            },
+            // 清理进行中：环上要有进度弧、圆心要写百分比。
+            Case {
+                name: "24-workbench-cleaning",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_cleaning,
+            },
+            // 清完那一刻：满绿环 + 「清理完成 / 已腾出」。
+            Case {
+                name: "25-workbench-cleaned",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_cleaned,
+            },
+            // 报错与提示改成弹窗之后的样子。
+            Case {
+                name: "26-status-modal",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_status_modal,
+            },
+            // 窄窗 + 弹窗：长句子不能把弹窗撑出屏幕。
+            Case {
+                name: "27-narrow-status-modal",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_status_modal,
             },
         ];
 
@@ -200,7 +269,6 @@ impl Shots {
             requested: false,
             saved: Arc::new(AtomicBool::new(false)),
             app: None,
-            scale: 1.0,
         };
         s.prepare(cc);
         s
@@ -212,6 +280,7 @@ impl Shots {
         let mut state = AppState::new("/Users/me".into());
         (case.setup)(&mut state);
         state.page = case.page;
+        self.apply_size(&cc.egui_ctx, case.name);
 
         let app = molt_gui::MoltApp::headless(&cc.egui_ctx, case.mode, state);
         // `Theme::install` 会把偏好设回 System，必须在它之后再锁一次
@@ -223,20 +292,6 @@ impl Shots {
         for th in [egui::Theme::Light, egui::Theme::Dark] {
             cc.egui_ctx.style_mut_of(th, |s| s.animation_time = 0.0);
         }
-        if case.big_font {
-            let mut t = molt_gui::theme::Theme {
-                mode: app.theme.mode,
-                palette: app.theme.palette,
-                scale: app.theme.scale,
-                follow_system: false,
-            };
-            t.scale = 1.4;
-            t.palette = t.palette.with_scale(1.4);
-            molt_gui::theme::reinstall(&cc.egui_ctx, &t);
-            self.scale = 1.4;
-        } else {
-            self.scale = 1.0;
-        }
         self.app = Some(app);
         self.frames = 0;
         self.requested = false;
@@ -245,9 +300,17 @@ impl Shots {
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         let Some(app) = &mut self.app else { return };
-        app.theme.scale = self.scale;
-        app.theme.palette = app.theme.palette.with_scale(self.scale);
         app.draw(ui);
+    }
+
+    /// 换窗口尺寸。宽度真的变小时，按钮与数字的重排才会显出来。
+    fn apply_size(&self, ctx: &egui::Context, name: &str) {
+        let size = if NARROW.contains(&name) {
+            egui::vec2(NARROW_SIZE[0], NARROW_SIZE[1])
+        } else {
+            egui::vec2(1120.0, 800.0)
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
     }
 }
 
@@ -256,7 +319,9 @@ impl eframe::App for Shots {
         self.draw(ui);
         self.frames += 1;
 
-        if self.frames < 3 {
+        if self.frames < 40 {
+            // 多空几帧：清理动画走 `stable_dt`，前几帧 dt 是 0，
+            // 环上的进度弧根本还没长出来。
             ui.ctx().request_repaint();
             return;
         }
@@ -287,8 +352,8 @@ impl eframe::App for Shots {
             let mut state = AppState::new("/Users/me".into());
             (case.setup)(&mut state);
             state.page = case.page;
+            self.apply_size(&ui.ctx().clone(), case.name);
             let mode = case.mode;
-            let big = case.big_font;
             let ctx = ui.ctx().clone();
             for th in [egui::Theme::Light, egui::Theme::Dark] {
                 ctx.style_mut_of(th, |s| s.animation_time = 0.0);
@@ -305,12 +370,7 @@ impl eframe::App for Shots {
             theme.mode = mode;
             theme.palette = molt_gui::theme::Palette::of(mode);
             theme.follow_system = false;
-            if big {
-                theme.scale = 1.4;
-                theme.palette = theme.palette.with_scale(1.4);
-            }
             molt_gui::theme::reinstall(&ctx, &theme);
-            self.scale = theme.scale;
             self.app = Some(molt_gui::MoltApp { theme, state });
             self.frames = 0;
             self.requested = false;
@@ -459,6 +519,17 @@ fn with_data(s: &mut AppState) {
     put(s, 24);
 }
 
+/// 只有磁盘读数、没有扫描结果：第一帧的画面就是这个状态。
+fn disk_only(s: &mut AppState) {
+    s.disk = Some(Ok(disk(228 << 30, 19 << 30)));
+}
+
+/// 连磁盘也读不到（例如盘被卸载、或统计调用失败）。
+fn without_disk(s: &mut AppState) {
+    s.disk = Some(Err("statvfs 失败".to_string()));
+    put(s, 24);
+}
+
 /// AI 解释过的状态：每一条都带一句说明。
 fn with_ai_notes(s: &mut AppState) {
     with_data(s);
@@ -515,7 +586,11 @@ fn with_protected(s: &mut AppState) {
     let list = vec![
         cand("~/.claude/projects", 88 << 20, protected()),
         cand("~/.ssh", 4 << 20, protected()),
-        cand("~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw", 12 << 30, protected()),
+        cand(
+            "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw",
+            12 << 30,
+            protected(),
+        ),
         cand("~/Library/Developer/Xcode/Archives", 6 << 30, protected()),
     ];
     s.apply_result(Arc::new(molt_gui::worker::ScanResult {
@@ -524,6 +599,75 @@ fn with_protected(s: &mut AppState) {
         denied_roots: vec!["~/Library/Mail".into()],
         elapsed_secs: 22.0,
     }));
+}
+
+/// 重扫失败、但旧结果还在：必须把「这是旧结果」画在最上面。
+fn with_stale(s: &mut AppState) {
+    with_data(s);
+    s.last_scan_at = Some("10:42".into());
+    s.error = Some("遍历 ~/Library/Caches 时被系统拒绝：没有读取权限".into());
+}
+
+/// AI 未配置：按钮该是灰的，旁边说清为什么。
+fn with_ai_unset(s: &mut AppState) {
+    with_data(s);
+    s.ai.config.active_provider.clear();
+    s.ai.config.active_model.clear();
+}
+
+/// AI 调了但失败了：结果条旁边要说「上次失败」并给一条去设置的路。
+fn with_ai_failed(s: &mut AppState) {
+    with_data(s);
+    s.ai.config.active_provider = "deepseek".into();
+    s.ai.config.active_model = "deepseek-chat".into();
+    s.ai.failure = Some(molt_gui::ai_worker::AiFailure {
+        message: "模型没有返回可解析的结果（HTTP 401：密钥无效）".into(),
+        fixable_by_config: true,
+        raw: None,
+    });
+}
+
+/// 筛到「要确认」：清单只留那一档，且必须有一条回得去的路（显示全部）。
+fn with_costly_filter(s: &mut AppState) {
+    with_data(s);
+    s.filter = molt_gui::state::Filter::Costly;
+    s.list_expanded = true;
+}
+
+/// 清理刚做完：首屏要能说出「本次运行已腾出多少」。
+///
+/// 这个数字此前只累加在 state 里从不显示，于是用户点完「清理」，
+/// 除了底部一条会消失的结果条之外没有任何持久证据。
+fn with_freed(s: &mut AppState) {
+    with_data(s);
+    s.session_freed = 1_240_000_000;
+}
+
+/// 清理进行到一半：进度弧 + 圆心百分比。
+fn with_cleaning(s: &mut AppState) {
+    with_data(s);
+    s.clean_anim = 0.46;
+    s.clean_total_items = 24;
+    s.clean_total_bytes = 3_600_000_000;
+}
+
+/// 刚清完：满绿环停住，圆心写「清理完成 / 已腾出」。
+fn with_cleaned(s: &mut AppState) {
+    with_data(s);
+    s.clean_anim = 1.0;
+    s.clean_done_secs = 1.5;
+    s.clean_was_delete = true;
+    s.clean_total_items = 24;
+    s.clean_total_bytes = 3_600_000_000;
+    s.session_freed = 3_600_000_000;
+}
+
+/// 一条失败提示：必须弹出来，不能只在角落写一行小字。
+fn with_status_modal(s: &mut AppState) {
+    with_data(s);
+    s.status = Some(molt_gui::state::StatusMessage::error(
+        "清理没能完成：/Users/me/project/molt/target 被另一个进程占用（cargo 正在编译）。关掉那个进程后可以重试。",
+    ));
 }
 
 /// 互斥状态：有任务在跑，所有会冲突的按钮都该是灰的。
@@ -642,6 +786,31 @@ fn with_automation_off(s: &mut AppState) {
     s.auto.installed = Some(false);
 }
 
+/// 历史页：已经筛到「永久删除」这一档。
+///
+/// 这张图要能看出两件事：分段上带计数、列表只剩这一档的行。
+fn with_history_filtered(s: &mut AppState) {
+    with_history(s);
+    s.history_filter = molt_gui::state::HistoryFilter::Gone;
+}
+
+/// 自动清理页：改过时间但还没保存。
+///
+/// 底部条必须在这一张图里说明「有未保存的更改」——这正是之前缺的那一步。
+fn with_automation_dirty(s: &mut AppState) {
+    with_automation(s);
+    let mut draft = s.auto.config.clone();
+    draft.hour = 9;
+    draft.minute = 15;
+    s.auto.draft = Some(draft);
+}
+
+/// 设置页：展开「高级」，把排障要用的原始字段露出来。
+fn with_settings_advanced(s: &mut AppState) {
+    with_settings(s);
+    s.settings_advanced = true;
+}
+
 fn with_settings(s: &mut AppState) {
     s.disk = Some(Ok(disk(228 << 30, 40 << 30)));
     if let Ok(rules) = molt_rules::load("/Users/me", None) {
@@ -650,9 +819,4 @@ fn with_settings(s: &mut AppState) {
     s.ai.config.active_provider = "deepseek".into();
     s.ai.config.active_model = "deepseek-chat".into();
     s.ai.config.providers[2].api_key = "sk-shots-demo".into();
-}
-
-fn with_settings_inspect(s: &mut AppState) {
-    with_settings(s);
-    s.ai.inspect = Some("typesafe".into());
 }

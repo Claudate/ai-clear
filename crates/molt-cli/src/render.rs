@@ -24,7 +24,7 @@ const BOLD: &str = "\x1b[1m";
 /// 打印完整清单。
 pub fn print_report(report: &ScanReport, show_protected: bool) {
     println!();
-    println!("{}Molt · 蜕{}", BOLD, RESET);
+    println!("{}净灵 · Cleanling{}", BOLD, RESET);
     println!("{}扫描完成，只读，未删除任何东西{}", DIM, RESET);
     println!();
     println!(

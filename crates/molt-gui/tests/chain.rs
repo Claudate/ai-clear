@@ -151,7 +151,33 @@ fn scan_ai_clean_schedule_feedback_chain() {
         Priority::Keep,
         "AI 说不要动的条目要排进「建议保留」"
     );
-    assert_eq!(state.ai_note(&target.display().to_string()).map(|s| s.contains("输出目录")), Some(true));
+    assert_eq!(
+        state
+            .ai_note(&target.display().to_string())
+            .map(|s| s.contains("输出目录")),
+        Some(true)
+    );
+
+    // ---- 2b. 首页那颗大按钮：走的就是默认勾选那批，不另算一批 ----
+    // 方案要求验证「点按钮 → 确认框里的数量 == 建议清掉 + 可以清」。
+    // 直接调 hero_action，而不是在测试里重写一遍分支。
+    state.ai.safe.clear(); // 上一步 AI 把 target 挪进了「建议留着」，先还原
+    molt_gui::pages::workbench::hero_action(&mut state);
+    let pending = state
+        .pending_clean
+        .clone()
+        .expect("有可清量时应生成待确认批次");
+    assert_eq!(
+        pending.items.len(),
+        state.cleanable_summary().0,
+        "首页按钮的批次必须等于「建议清掉 + 可以清」，否则首页报的 GB 和确认框对不上"
+    );
+    assert_eq!(
+        pending.mode,
+        molt_act::CleanMode::Quarantine,
+        "放入临时空间是首页的默认选项"
+    );
+    state.pending_clean = None;
 
     // ---- 3. 定时清理：只清勾选的 auto 类型，且只走隔离区 ----
     // 规则库里的真实 id：npm-cache 是 auto 且可回收；rust-target 不是 auto。
@@ -211,10 +237,21 @@ fn scan_ai_clean_schedule_feedback_chain() {
     wait_idle(&mut state);
     apply(
         &mut state,
-        vec![cat(&locked, 512, Verdict::Reclaimable, "npm-cache")],
+        vec![
+            cat(&locked, 512, Verdict::Reclaimable, "npm-cache"),
+            // 一条能成功的：用来确认「成功」时结果条给出的是「去隔离区」，
+            // 而不是把用户留在原地自己想下一步。
+            cat(
+                &home.join("ok-cache"),
+                256,
+                Verdict::Reclaimable,
+                "npm-cache",
+            ),
+        ],
     );
+    make_dir_with_file(&home.join("ok-cache"), "k.bin", 256);
     let n = state.checked_count();
-    assert_eq!(n, 1);
+    assert_eq!(n, 2);
     state.pending_clean = state.pending_from_checked(molt_act::CleanMode::Delete);
     molt_gui::pages::workbench::do_clean(&mut state);
     wait_clean(&mut state);
@@ -223,25 +260,98 @@ fn scan_ai_clean_schedule_feedback_chain() {
     let op = state.last_op.as_ref().expect("应有结果报告");
     assert_eq!(
         op.kind,
-        StatusKind::Error,
-        "一项都没成时必须报错，不能显示成成功：{}",
+        StatusKind::Warn,
+        "一部分没做成要报 Warn，不能说成全部成功：{}",
         op.summary
     );
     assert!(
         !op.failures.is_empty() && !op.failures[0].1.is_empty(),
         "失败必须带原因"
     );
+    // 有失败时下一步是「重试这些」，而不是把用户送去别处
+    assert_eq!(
+        op.next,
+        Some(molt_gui::state::NextStep::Retry),
+        "部分失败要给出一条重试的路"
+    );
 
     let mut perms = std::fs::metadata(&locked_parent).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&locked_parent, perms).unwrap();
 
+    // 全部成功时：结果条要指向「刚刚移走的东西去哪了」
+    wait_idle(&mut state);
+    apply(
+        &mut state,
+        vec![cat(
+            &home.join("ok-cache-2"),
+            128,
+            Verdict::Reclaimable,
+            "npm-cache",
+        )],
+    );
+    make_dir_with_file(&home.join("ok-cache-2"), "k.bin", 128);
+    state.pending_clean = state.pending_from_checked(molt_act::CleanMode::Quarantine);
+    molt_gui::pages::workbench::do_clean(&mut state);
+    wait_clean(&mut state);
+    let op = state.last_op.as_ref().expect("应有结果报告");
+    assert_eq!(op.kind, StatusKind::Info, "全成时要报成功：{}", op.summary);
+    assert_eq!(
+        op.next,
+        Some(molt_gui::state::NextStep::Quarantine),
+        "移入隔离区成功后要能直接去隔离区"
+    );
+    // 点那一步真的会切页，而不是只画了个按钮
+    molt_gui::app::apply_report_action(
+        &mut state,
+        molt_gui::widgets::ReportAction::Next(molt_gui::state::NextStep::Quarantine),
+    );
+    assert_eq!(state.page, molt_gui::state::Page::Quarantine);
+    assert!(
+        state.quarantine.iter().any(|r| r.restorable),
+        "切过去之后隔离区里要真的有可还原的东西"
+    );
+
     // ---- 6. 隔离区里能还原那条定时清理移走的内容 ----
     molt_gui::pages::quarantine::reload(&mut state);
-    assert_eq!(state.quarantine.len(), 1);
-    let id = state.quarantine[0].id;
+    // 不数总数：这轮清理自己也往隔离区放了一条，按路径找才不受前面几步影响。
+    let row = state
+        .quarantine
+        .iter()
+        .find(|r| r.restorable && r.original.ends_with("_cacache"))
+        .expect("定时清理移走的 npm 缓存应当还在隔离区里");
+    let id = row.id;
     molt_gui::pages::quarantine::restore(&mut state, id);
     assert!(cache.exists(), "定时清理走的是可还原路径，必须能拿回来");
+
+    // ---- 6. 设置页填密钥：落盘、收紧权限、立刻生效（不用重启） ----
+    // 这是「不许让用户去改环境变量」那条要求的落地证据。
+    // 选一个真正需要密钥的服务：本地 ollama / jev 本来就不要密钥，
+    // 拿它们验「密钥保存」什么都验不出来。
+    state.ai.config.set_provider("deepseek");
+    state.key_draft = "sk-test-not-a-real-key".into();
+    molt_gui::pages::settings::save_api_key(&mut state);
+
+    assert!(
+        state.key_draft.is_empty(),
+        "保存后必须清空输入框（状态栏：{:?}）：留着它就有被截图拍到的风险",
+        state.status.as_ref().map(|s| &s.text)
+    );
+    let path = state.ai.config_path.clone();
+    let text = std::fs::read_to_string(&path).expect("配置文件应已写出");
+    assert!(
+        text.contains("sk-test-not-a-real-key"),
+        "密钥要写进配置文件，而不是只存在内存里"
+    );
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "密钥文件必须只有本人可读，实际 {mode:o}");
+    assert!(
+        state.ai.resolve().is_ok(),
+        "写完就该能解析出可用配置，不需要重启：{:?}（服务 {} / 模型 {}）",
+        state.ai.resolve().err(),
+        state.ai.config.active_provider,
+        state.ai.config.active_model
+    );
 
     let _ = std::fs::remove_dir_all(&home);
 }

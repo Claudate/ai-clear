@@ -601,7 +601,12 @@ verdict = {{ type = "reclaimable" }}
             },
         ];
         let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
-        assert_eq!(rc, 0, "设置 mtime 失败：{}", std::io::Error::last_os_error());
+        assert_eq!(
+            rc,
+            0,
+            "设置 mtime 失败：{}",
+            std::io::Error::last_os_error()
+        );
     }
 
     fn stale_rules(path: &str) -> molt_core::RuleSet {

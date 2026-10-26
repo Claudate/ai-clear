@@ -119,8 +119,7 @@ fn migrate_legacy_dir(new_dir: &Path) -> MigrationReport {
             if is_empty_audit_db(&dst) && !is_empty_audit_db(&entry.path()) {
                 let tmp = new_dir.join(format!(".{shown}.replacing"));
                 let _ = std::fs::remove_file(&tmp);
-                if std::fs::copy(entry.path(), &tmp).is_ok()
-                    && std::fs::rename(&tmp, &dst).is_ok()
+                if std::fs::copy(entry.path(), &tmp).is_ok() && std::fs::rename(&tmp, &dst).is_ok()
                 {
                     let _ = std::fs::remove_file(entry.path());
                     report.moved += 1;
@@ -323,7 +322,10 @@ mod tests {
             b"new",
             "新库不能被旧库覆盖"
         );
-        assert_eq!(report.skipped_existing, 1, "跳过旧版要计数，不能被当成没发生");
+        assert_eq!(
+            report.skipped_existing, 1,
+            "跳过旧版要计数，不能被当成没发生"
+        );
         assert!(report.failed.is_empty());
         fs::remove_dir_all(&base).ok();
     }
@@ -335,7 +337,11 @@ mod tests {
         let new = base.join("app.molt");
         let report = migrate_legacy_dir(&new);
         assert!(!new.exists());
-        assert_eq!(report, MigrationReport::default(), "没有旧目录时什么也不该报告");
+        assert_eq!(
+            report,
+            MigrationReport::default(),
+            "没有旧目录时什么也不该报告"
+        );
         fs::remove_dir_all(&base).ok();
     }
 
