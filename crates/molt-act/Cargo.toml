@@ -6,9 +6,12 @@ license.workspace = true
 
 [dependencies]
 molt-core.workspace = true
+molt-safety.workspace = true
+molt-scan.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 rusqlite.workspace = true
 flate2 = "1"
 tar = "0.4"
+plist = "1.10.3"

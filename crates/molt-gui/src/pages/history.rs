@@ -12,11 +12,12 @@
 
 use eframe::egui;
 
+use crate::action::Action;
 use crate::state::{AppState, HistoryAction, HistoryFilter, HistoryRow};
 use crate::theme::Palette;
 use crate::widgets::{badge, card, page_header, primary_button, secondary_button, state_block};
 
-pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
+pub fn show(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Action>) {
     page_header(
         ui,
         p,
@@ -24,7 +25,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
         "每一次清理都留一条记录：放入临时空间、还原、彻底删除各自一行。",
         |ui| {
             if secondary_button(ui, p, "刷新", true) {
-                reload(state);
+                acts.push(Action::LoadHistory);
             }
         },
     );
@@ -46,7 +47,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
             );
             ui.add_space(10.0);
             if primary_button(ui, p, "重试", true) {
-                reload(state);
+                acts.push(Action::LoadHistory);
             }
         });
         return;
@@ -111,8 +112,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     });
     ui.add_space(10.0);
 
-    ui.add_space(10.0);
-
     // 筛选：历史会一直累积，用户来这页几乎总是在找一个具体的类别。
     // 计数直接给在分段上，不点也能看出「永久删了多少次」。
     let n_all = state.history.len();
@@ -143,7 +142,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
         .map(|(t, f)| (t.as_str(), state.history_filter == *f))
         .collect();
     if let Some(i) = crate::widgets::segmented(ui, p, &refs) {
-        state.history_filter = opts[i].1;
+        acts.push(Action::SetHistoryFilter(opts[i].1));
     }
     ui.add_space(10.0);
 
@@ -169,18 +168,33 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
         return;
     }
 
-    let row_h = p.sz(70.0);
+    let row_h = p.sz(66.0);
     let total = rows.len();
+    let loaded = state.history.len();
+    // 留出页脚那一行：载入有上限，用户得知道「看到的不是全部」。
+    let list_h = (ui.available_height() - p.sz(26.0)).max(p.sz(160.0));
 
     egui::ScrollArea::vertical()
+        .max_height(list_h)
         .auto_shrink([false, false])
         .show_rows(ui, row_h, total, |ui, range| {
+            // 行距清零：时间线靠一条细线分隔，行高本身已经是留白。
+            ui.spacing_mut().item_spacing.y = 0.0;
             for i in range {
                 if let Some(row) = rows.get(i) {
                     line(ui, state, p, row);
                 }
             }
         });
+
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(format!(
+            "仅显示最近载入的 {loaded} 条记录，更早的不在列表里。"
+        ))
+        .size(p.sz(10.5))
+        .color(p.text_faint),
+    );
 }
 
 /// 一行历史事件。没有操作按钮——这一页只回答「发生过什么」。
@@ -193,13 +207,10 @@ fn line(ui: &mut egui::Ui, state: &AppState, p: &Palette, row: &HistoryRow) {
     };
     let full_w = ui.available_width();
 
-    egui::Frame::NONE
-        .fill(p.surface)
-        .stroke(egui::Stroke::new(1.0, p.border))
-        .corner_radius(egui::CornerRadius::same(crate::theme::RADIUS_CONTROL))
-        .inner_margin(egui::Margin::symmetric(14, 9))
+    let resp = egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
-            ui.set_width(full_w - 30.0);
+            ui.set_width(full_w - 20.0);
             ui.horizontal(|ui| {
                 let size_w = p.sz(84.0);
                 let left_w = (ui.available_width() - size_w - 12.0).max(p.sz(140.0));
@@ -246,9 +257,11 @@ fn line(ui: &mut egui::Ui, state: &AppState, p: &Palette, row: &HistoryRow) {
                             }
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(short_time(&row.at))
-                                        .size(p.sz(10.0))
-                                        .color(p.text_faint),
+                                    egui::RichText::new(crate::components::time::short_time(
+                                        &row.at,
+                                    ))
+                                    .size(p.sz(10.0))
+                                    .color(p.text_faint),
                                 )
                                 .wrap_mode(egui::TextWrapMode::Extend),
                             );
@@ -277,15 +290,16 @@ fn line(ui: &mut egui::Ui, state: &AppState, p: &Palette, row: &HistoryRow) {
                     );
                 });
             });
-        });
-}
+        })
+        .response;
 
-fn short_time(iso: &str) -> String {
-    if iso.len() >= 16 {
-        format!("{} {}", &iso[0..10], &iso[11..16])
-    } else {
-        iso.to_string()
-    }
+    // 时间线靠一条细线分隔行，不用卡片边框：一页记录是一整条流，
+    // 每行一张白卡会把它们切成互不相干的条目。
+    ui.painter().hline(
+        resp.rect.x_range(),
+        resp.rect.max.y - 0.5,
+        egui::Stroke::new(1.0, p.row_separator),
+    );
 }
 
 pub fn reload(state: &mut AppState) {

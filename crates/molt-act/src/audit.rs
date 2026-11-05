@@ -114,6 +114,18 @@ pub struct NewQuarantine<'a> {
     pub source: CleanSource,
 }
 
+/// 一条新建记录（`create_log` 的一行）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateRecord {
+    pub id: i64,
+    pub path: PathBuf,
+    pub kind: String,
+    pub batch: String,
+    pub created_at: String,
+    /// 创建瞬间的 mtime，纳秒。撤销时靠它判断「之后有没有人动过」。
+    pub mtime: i64,
+}
+
 /// 审计库。持有一个 SQLite 连接，schema 在构造时确保存在。
 pub struct AuditStore {
     conn: Connection,
@@ -188,6 +200,97 @@ impl AuditStore {
                 [],
             )?;
         }
+
+        // 新建文件夹/文件的记录放**另一张表**。
+        //
+        // 塞进 action_log 是不行的：它的 CHECK 只认 quarantine/restore/purge，
+        // 而改约束要重建整张表——那张表存着用户唯一一份还原凭据。
+        // 另一张表的代价只是多一条查询，收益是这张表可以随便演进。
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS create_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                path        TEXT NOT NULL,
+                kind        TEXT NOT NULL CHECK (kind IN ('dir','file')),
+                batch       TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                mtime_at    INTEGER NOT NULL,
+                undone      INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_create_batch ON create_log(batch) WHERE undone = 0;
+            "#,
+        )?;
+        Ok(())
+    }
+
+    /// 记一条「我建了这个」。返回新记录的 id。
+    ///
+    /// `mtime_at` 是创建瞬间的纳秒时间戳，撤销时靠它区分
+    /// 「还是我建的那个空壳」与「后来被用户改过的东西」。
+    pub fn record_create(
+        &self,
+        path: &Path,
+        kind: crate::create::CreateKind,
+        batch: &str,
+        performed_at: &str,
+        mtime_at: i64,
+    ) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO create_log (path, kind, batch, created_at, mtime_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                path.to_string_lossy(),
+                kind.as_str(),
+                batch,
+                performed_at,
+                mtime_at
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 一批里还没撤销的记录，按 id 升序。
+    pub fn pending_create_batch(&self, batch: &str) -> rusqlite::Result<Vec<CreateRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, kind, batch, created_at, mtime_at
+             FROM create_log WHERE batch = ?1 AND undone = 0 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![batch], |r| {
+            Ok(CreateRecord {
+                id: r.get(0)?,
+                path: PathBuf::from(r.get::<_, String>(1)?),
+                kind: r.get(2)?,
+                batch: r.get(3)?,
+                created_at: r.get(4)?,
+                mtime: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 最近一批可撤销的创建。界面靠它显示「撤销刚才那次创建」。
+    ///
+    /// 只认**全部条目都还在**的批：撤了一半的批再撤一次会给出
+    /// 一堆「已经不在了」的说明，那不算一次可撤销的操作。
+    pub fn last_undoable_batch(&self) -> rusqlite::Result<Option<String>> {
+        let batch: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT batch FROM create_log WHERE undone = 0
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(batch)
+    }
+
+    /// 标记一条已撤销。留痕而不删除：事后要能回答「那次创建后来怎么了」。
+    pub fn mark_create_undone(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE create_log SET undone = 1 WHERE id = ?1",
+            params![id],
+        )?;
         Ok(())
     }
 

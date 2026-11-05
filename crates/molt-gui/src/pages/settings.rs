@@ -11,11 +11,12 @@
 
 use eframe::egui;
 
+use crate::action::Action;
 use crate::state::{AppState, StatusMessage};
 use crate::theme::Palette;
-use crate::widgets::{badge, card, kv, page_header, secondary_button};
+use crate::widgets::{badge, kv, page_header, plain_section, secondary_button};
 
-pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
+pub fn show(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Action>) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -26,18 +27,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                 "AI 解释是可选的；不配置也能正常扫描和清理。",
                 |ui| {
                     if secondary_button(ui, p, "重新读取配置", !state.is_busy()) {
-                        state.ai.reload_config();
-                        state.status = Some(StatusMessage::info("已重新读取 AI 配置"));
+                        acts.push(Action::ReloadAiConfig);
                     }
                 },
             );
             ui.add_space(12.0);
 
-            model_card(ui, state, p);
-            ui.add_space(10.0);
-            advanced_card(ui, state, p);
-            ui.add_space(10.0);
-            rules_card(ui, state, p);
+            // 纵向分组而不是卡片堆：设置页是「一条一条读下去」的，
+            // 每块套一张白卡会把它切成互不相干的纸片。
+            plain_section(ui, p, |ui| model_card(ui, state, p, acts));
+            plain_section(ui, p, |ui| advanced_card(ui, state, p, acts));
+            plain_section(ui, p, |ui| rules_card(ui, state, p));
         });
 }
 
@@ -46,8 +46,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
 /// 主视线只放用户在意的三件事：现在用的是谁、密钥备好了没有、想换哪家 / 哪个模型。
 /// 配置文件里的原始字段（id、base_url、请求路径、密钥环境变量名）收进「高级」——
 /// 那是排障时才要的东西，放在主视觉里只会把可做的操作挤走。
-fn model_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
-    card(ui, p, |ui| {
+fn model_card(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Action>) {
+    ui.vertical(|ui| {
         ui.label(egui::RichText::new("模型功能").size(p.sz(13.5)).strong());
         ui.add_space(4.0);
         ui.add(
@@ -114,8 +114,7 @@ fn model_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                 }
             }
             if let Some(id) = pick {
-                state.ai.config.set_provider(&id);
-                save_ai_config(state);
+                acts.push(Action::SetAiProvider(id));
             }
         });
         ui.add_space(8.0);
@@ -161,8 +160,7 @@ fn model_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                 }
             });
             if let Some(id) = pick_model {
-                state.ai.config.active_model = id;
-                save_ai_config(state);
+                acts.push(Action::SetAiModel(id));
             }
             ui.add_space(8.0);
         }
@@ -215,7 +213,8 @@ fn model_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
             ui.add_space(6.0);
             let mut save = false;
             ui.horizontal(|ui| {
-                let edit = egui::TextEdit::singleline(&mut state.key_draft)
+                let mut draft = state.key_draft.clone();
+                let edit = egui::TextEdit::singleline(&mut draft)
                     .password(true)
                     .hint_text(if has_key {
                         "粘贴新密钥可换掉旧的"
@@ -225,6 +224,9 @@ fn model_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                     .desired_width(p.sz(300.0))
                     .font(egui::FontId::proportional(p.sz(12.5)));
                 let resp = ui.add(edit);
+                if resp.changed() {
+                    acts.push(Action::SetKeyDraft(draft.clone()));
+                }
                 // 回车即保存：粘贴完接着按回车是最自然的动作，
                 // 让它失效就等于逼用户去找按钮。
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -236,7 +238,7 @@ fn model_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                 }
             });
             if save {
-                save_api_key(state);
+                acts.push(Action::SaveApiKey);
             }
             ui.add_space(4.0);
             ui.add(
@@ -347,7 +349,7 @@ fn provider_label(prov: &molt_ai::Provider) -> String {
 ///
 /// 换服务与换模型是同一件事的两步，落盘与报错也就该只有一份实现——
 /// 两处各写一遍最容易出现「一处记住了失败、另一处忘了」。
-fn save_ai_config(state: &mut AppState) {
+pub fn save_ai_config(state: &mut AppState) {
     match state.ai.config.save(&state.ai.config_path) {
         Ok(()) => {
             state.ai.config_error = None;
@@ -370,9 +372,9 @@ fn save_ai_config(state: &mut AppState) {
 /// 默认折起来。普通用户不需要看到 base_url 与环境变量名，但排障时必须能拿到——
 /// 之前这些字段直接被删掉了，用户遇到「为什么调不通」时无处可查。
 /// 密钥只报「已设置 / 未设置」，从不显示原值：这个窗口会被截图、会被共享屏幕。
-fn advanced_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
+fn advanced_card(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Action>) {
     let open = state.settings_advanced;
-    card(ui, p, |ui| {
+    ui.vertical(|ui| {
         let head = if open { "高级  ▾" } else { "高级  ▸" };
         if ui
             .add(
@@ -381,7 +383,7 @@ fn advanced_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
             )
             .clicked()
         {
-            state.settings_advanced = !open;
+            acts.push(Action::ToggleSettingsAdvanced);
         }
         if !open {
             return;
@@ -460,7 +462,7 @@ fn advanced_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
         // jev 的兜底入口：删除判断在用户没指定模型时落到 jev，
         // 但界面上得有一条「我现在就想用它」的路，而不是靠运气撞上默认值。
         // 服务 id 不写死：jev 属于哪个服务由配置决定，换一份配置也不该指错。
-        let jev_provider = state
+        let has_jev_provider = state
             .ai
             .config
             .providers
@@ -470,16 +472,13 @@ fn advanced_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                     .iter()
                     .any(|m| m.id == molt_ai::config::JEV_MODEL_ID)
             })
-            .map(|x| x.id.clone());
+            .map(|_| ())
+            .is_some();
         let on_jev = state.ai.config.active_model == molt_ai::config::JEV_MODEL_ID;
-        if let Some(pid) = jev_provider {
-            if !on_jev {
-                ui.add_space(8.0);
-                if secondary_button(ui, p, "改用 jev（本地判定引擎）", !state.is_busy()) {
-                    state.ai.config.set_provider(&pid);
-                    state.ai.config.active_model = molt_ai::config::JEV_MODEL_ID.to_string();
-                    save_ai_config(state);
-                }
+        if has_jev_provider && !on_jev {
+            ui.add_space(8.0);
+            if secondary_button(ui, p, "改用 jev（本地判定引擎）", !state.is_busy()) {
+                acts.push(Action::UseJev);
             }
         }
     });
@@ -487,7 +486,7 @@ fn advanced_card(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
 
 /// 规则库与应用数据的位置。
 fn rules_card(ui: &mut egui::Ui, state: &AppState, p: &Palette) {
-    card(ui, p, |ui| {
+    ui.vertical(|ui| {
         ui.label(egui::RichText::new("清理规则").size(p.sz(13.5)).strong());
         ui.add_space(4.0);
         match &state.rules {

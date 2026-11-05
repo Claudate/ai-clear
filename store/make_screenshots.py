@@ -39,17 +39,17 @@ HELVETICA = "/System/Library/Fonts/Helvetica.ttc"
 # 文件名用 ASCII：App Store Connect 按文件名排上传顺序，中文名在不同系统下
 # 排序结果不一样，带编号的英文名能把顺序钉住。
 CASES = [
-    ("01-overview", "01-free-space",
+    ("01-workbench", "01-free-space",
      "一眼看到能腾多少", "At a glance: how much you can free"),
-    ("05-list-many", "02-every-item",
+    ("09-confirm-quarantine", "02-every-item",
      "每一项都写清删了会怎样", "Every item says what deleting costs"),
-    ("08-confirm", "03-confirm",
-     "动手前再问一次，可随时还原", "One more confirmation - restorable for 7 days"),
-    ("13-quarantine", "04-quarantine",
+    ("12-quarantine", "03-quarantine",
      "7 天内随时放回原处", "Put anything back within 7 days"),
-    ("21-ai-plan", "05-ai-analysis",
-     "让模型解释，但不让它决定删除", "AI explains. It never decides what to delete"),
-    ("22-ai-plan-dark", "06-dark-mode",
+    ("15-automation", "04-automation",
+     "定时只清纯缓存，不碰构建产物", "Scheduled cleanup touches only pure caches"),
+    ("14-history", "05-history",
+     "每笔操作都有记录，手动与自动分得清", "Every action logged - manual or scheduled"),
+    ("03-workbench-dark", "06-dark-mode",
      "跟随系统外观，字可放大", "Follows system appearance, text can scale"),
 ]
 
@@ -127,8 +127,8 @@ def main() -> None:
         src = SHOT / f"{name}.png"
         if not src.exists():
             raise SystemExit(f"缺少界面底图 {src}，先跑 shots")
-        compose(src, zh_dir / f"{out_name}.png", zh_title, "蜕 · Molt", latin=False)
-        compose(src, en_dir / f"{out_name}.png", en_title, "Molt", latin=True)
+        compose(src, zh_dir / f"{out_name}.png", zh_title, "净灵 · Cleanling", latin=False)
+        compose(src, en_dir / f"{out_name}.png", en_title, "Cleanling", latin=True)
 
 
 if __name__ == "__main__":

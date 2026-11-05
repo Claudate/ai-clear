@@ -9,14 +9,15 @@
 
 use eframe::egui;
 
-use crate::state::{AppState, PendingItem, StatusMessage};
+use crate::action::Action;
+use crate::state::{AppState, StatusMessage};
 use crate::theme::Palette;
 use crate::widgets::{
-    badge, card, danger_button, danger_ghost_button, page_header, primary_button, secondary_button,
-    state_block,
+    badge, card, danger_ghost_button, danger_text_button, page_header, primary_button,
+    secondary_button, state_block,
 };
 
-pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
+pub fn show(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Action>) {
     page_header(
         ui,
         p,
@@ -27,7 +28,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
         ),
         |ui| {
             if secondary_button(ui, p, "刷新", !state.is_purging() && state.can_start()) {
-                reload(state);
+                acts.push(Action::LoadQuarantine);
             }
         },
     );
@@ -49,7 +50,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
             );
             ui.add_space(10.0);
             if primary_button(ui, p, "重试", true) {
-                reload(state);
+                acts.push(Action::LoadQuarantine);
             }
         });
         return;
@@ -57,6 +58,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
 
     if state.is_purging() {
         purging_view(ui, state, p);
+        return;
+    }
+
+    if state.restore_job.is_some() {
+        restoring_view(ui, state, p);
         return;
     }
 
@@ -87,11 +93,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     summary_card(ui, state, p);
     ui.add_space(10.0);
 
-    if crate::app::apply_report_action(
-        state,
-        crate::widgets::op_report(ui, p, state.last_op.as_deref()),
-    ) {
-        state.last_op = None;
+    match crate::widgets::op_report(ui, p, state.last_op.as_deref()) {
+        crate::widgets::ReportAction::Dismiss => acts.push(Action::DismissReport),
+        crate::widgets::ReportAction::Next(next) => acts.push(Action::FollowNextStep(next)),
+        crate::widgets::ReportAction::None => {}
     }
     if state.last_op.is_some() {
         ui.add_space(10.0);
@@ -105,31 +110,38 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
     let rows = state.quarantine.clone();
     let mut restore_id: Option<i64> = None;
     let mut toggle_id: Option<i64> = None;
+    let mut purge_id: Option<i64> = None;
 
     egui::ScrollArea::vertical()
         .max_height(list_h)
         .auto_shrink([false, false])
         .show_rows(ui, row_h, total, |ui, range| {
+            // 行距清零：行与行靠一条细线分隔，而不是靠空隙。
+            ui.spacing_mut().item_spacing.y = 0.0;
             for i in range {
                 if let Some(row) = rows.get(i) {
                     match line(ui, state, p, row, row_h) {
                         RowAction::None => {}
                         RowAction::Toggle => toggle_id = Some(row.id),
                         RowAction::Restore => restore_id = Some(row.id),
+                        RowAction::Purge => purge_id = Some(row.id),
                     }
                 }
             }
         });
 
     if let Some(id) = toggle_id {
-        state.toggle_quarantine(id);
+        acts.push(Action::ToggleQuarantineCheck(id));
     }
     if let Some(id) = restore_id {
-        restore(state, id);
+        acts.push(Action::RestoreOne(id));
+    }
+    if let Some(id) = purge_id {
+        acts.push(Action::PreparePurgeOne(id));
     }
 
     ui.add_space(8.0);
-    footer(ui, state, p);
+    footer(ui, state, p, acts);
 }
 
 /// 顶部汇总：还剩多少、最晚什么时候到期。
@@ -213,6 +225,7 @@ enum RowAction {
     None,
     Toggle,
     Restore,
+    Purge,
 }
 
 /// 一行隔离区条目。返回用户想做的动作。
@@ -226,19 +239,16 @@ fn line(
     let busy = state.restoring == Some(row.id);
     let checked = state.is_quarantine_checked(row.id);
     let full_w = ui.available_width();
+    // 右栏是按钮区（大小、还原、彻底删除）。行点击区要把它让出来，
+    // 否则整行 intera​ct 会盖在按钮上——点「还原」只会勾选整行。
+    let actions_w = p.sz(248.0);
     let mut action = RowAction::None;
 
+    // 行列表而不是卡片：这一页和首页清单一样是"一列条目"，
+    // 每行套一张带边框的白卡会把它们切成互不相干的纸片。
+    // 选中只用底色标出，不靠边框加粗。
     let resp = egui::Frame::NONE
         .fill(if checked { p.accent_soft } else { p.surface })
-        .stroke(egui::Stroke::new(
-            if checked { 1.5 } else { 1.0 },
-            if checked {
-                p.reclaimable.gamma_multiply(0.5)
-            } else {
-                p.border
-            },
-        ))
-        .corner_radius(egui::CornerRadius::same(crate::theme::RADIUS_CONTROL))
         .inner_margin(egui::Margin::symmetric(14, 9))
         .show(ui, |ui| {
             ui.set_width(full_w - 30.0);
@@ -246,14 +256,16 @@ fn line(
             ui.horizontal(|ui| {
                 // 勾选只对有内容可删的行开放
                 if row.restorable {
-                    checkbox(ui, p, checked);
+                    // actionable = 这一行有内容可还原；interactive = 现在没有任务在跑。
+                    // 两者分开，因为「这一行不能选」和「此刻全局禁用」对用户是两件事。
+                    crate::components::checkbox::checkbox(ui, p, checked, true, state.can_select());
                     ui.add_space(4.0);
                 } else {
                     ui.add_space(p.sz(21.0));
                 }
 
                 let size_w = p.sz(84.0);
-                let left_w = (ui.available_width() - size_w - p.sz(150.0)).max(p.sz(120.0));
+                let left_w = (ui.available_width() - size_w - actions_w).max(p.sz(120.0));
                 ui.allocate_ui_with_layout(
                     egui::vec2(left_w, row_h - p.sz(18.0)),
                     egui::Layout::top_down(egui::Align::Min),
@@ -293,17 +305,17 @@ fn line(
                                 // 会不会没，而不是到期日是哪一天。
                                 Some(d) if d > 0 => format!(
                                     "移入 {} · 还剩 {d} 天（{} 到期）",
-                                    short_time(&row.at),
-                                    short_time(&row.purge_after)
+                                    crate::components::time::short_time(&row.at),
+                                    crate::components::time::short_time(&row.purge_after)
                                 ),
                                 Some(_) => format!(
                                     "移入 {} · 今天到期，之后会自动删除",
-                                    short_time(&row.at)
+                                    crate::components::time::short_time(&row.at)
                                 ),
                                 None => format!(
                                     "移入 {} · 最晚保留到 {}",
-                                    short_time(&row.at),
-                                    short_time(&row.purge_after)
+                                    crate::components::time::short_time(&row.at),
+                                    crate::components::time::short_time(&row.purge_after)
                                 ),
                             }
                         } else {
@@ -332,6 +344,13 @@ fn line(
                     );
                     ui.add_space(10.0);
                     if row.restorable {
+                        // 危险动作走文字按钮：单条删除是可达的，但不该和「还原」
+                        // 长得一样重——这一行的默认动作永远是还原。
+                        if danger_text_button(ui, p, "彻底删除…", !busy && state.can_start())
+                        {
+                            action = RowAction::Purge;
+                        }
+                        ui.add_space(8.0);
                         let label = if busy { "还原中…" } else { "还原" };
                         // 互斥：有扫描/清理/定时任务在跑时不能开始还原——
                         // 两边同时写盘会让失败原因变得无法解释
@@ -344,9 +363,17 @@ fn line(
         })
         .response;
 
+    ui.painter().hline(
+        resp.rect.x_range(),
+        resp.rect.max.y - 0.5,
+        egui::Stroke::new(1.0, p.row_separator),
+    );
+
     if row.restorable {
+        let mut hit_rect = resp.rect;
+        hit_rect.max.x -= actions_w;
         let hit = ui.interact(
-            resp.rect,
+            hit_rect,
             ui.scope_id().with(("q-row", row.id)),
             egui::Sense::click(),
         );
@@ -360,36 +387,7 @@ fn line(
     action
 }
 
-fn checkbox(ui: &mut egui::Ui, p: &Palette, checked: bool) {
-    let d = p.sz(17.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
-    let r = egui::CornerRadius::same(4);
-    if checked {
-        ui.painter().rect_filled(rect, r, p.reclaimable);
-        let c = rect.center();
-        let s = p.sz(3.6);
-        ui.painter().line_segment(
-            [c + egui::vec2(-s, 0.0), c + egui::vec2(-s * 0.2, s * 0.8)],
-            egui::Stroke::new(1.7, p.on_accent()),
-        );
-        ui.painter().line_segment(
-            [
-                c + egui::vec2(-s * 0.2, s * 0.8),
-                c + egui::vec2(s, -s * 0.7),
-            ],
-            egui::Stroke::new(1.7, p.on_accent()),
-        );
-    } else {
-        ui.painter().rect_stroke(
-            rect,
-            r,
-            egui::Stroke::new(1.0, p.border_strong),
-            egui::StrokeKind::Inside,
-        );
-    }
-}
-
-fn footer(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
+fn footer(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Action>) {
     egui::Frame::NONE
         .fill(p.bg)
         .inner_margin(egui::Margin::symmetric(0, 6))
@@ -430,19 +428,19 @@ fn footer(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // 最右是这一页的主操作：还原（可逆、安全）
                     if primary_button(ui, p, "还原所选", enabled) {
-                        restore_selected(state);
+                        acts.push(Action::RestoreSelected);
                     }
                     ui.add_space(6.0);
                     // 危险操作紧挨在左：彻底删除，要过一次确认
                     if danger_ghost_button(ui, p, "彻底删除…", enabled) {
-                        state.pending_purge = state.pending_purge_from_checked();
+                        acts.push(Action::PreparePurge);
                     }
                     ui.add_space(8.0);
                     if secondary_button(ui, p, "全不选", n > 0 && state.can_select()) {
-                        state.clear_quarantine_selection();
+                        acts.push(Action::ClearQuarantineSelection);
                     }
                     if secondary_button(ui, p, "全选", state.can_select()) {
-                        state.select_all_quarantine();
+                        acts.push(Action::SelectAllQuarantine);
                     }
                 });
             });
@@ -453,139 +451,91 @@ fn footer(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
 ///
 /// 与清单页的确认框同一套视觉语言，但文案只讲这一件事：
 /// 这些内容本来还在隔离区里，这一步之后就真的没有了。
-pub fn confirm_purge_modal(ui: &mut egui::Ui, state: &mut AppState, p: &Palette) {
+pub fn confirm_purge_modal(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    p: &Palette,
+    acts: &mut Vec<Action>,
+) {
     let Some(pending) = state.pending_purge.clone() else {
         return;
     };
-    let mut close = false;
-    let mut confirm = false;
 
-    egui::Modal::new(egui::Id::unique("molt-confirm-purge"))
-        .backdrop_color(egui::Color32::from_black_alpha(80))
-        .frame(
-            egui::Frame::NONE
-                .fill(p.surface)
-                .stroke(egui::Stroke::new(1.0, p.danger))
-                .corner_radius(egui::CornerRadius::same(crate::theme::RADIUS_CARD))
-                .inner_margin(egui::Margin::same(24)),
-        )
-        .show(ui.ctx(), |ui| {
-            ui.set_width(p.sz(440.0).min(ui.available_width()));
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new("从临时空间彻底删除这些内容？")
-                        .size(p.sz(17.0))
-                        .strong()
-                        .color(p.danger),
-                )
-                .wrap_mode(egui::TextWrapMode::Wrap),
-            );
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!("{} 项", pending.count()))
-                            .size(p.sz(22.0))
-                            .strong()
-                            .color(p.danger),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Extend),
-                );
-                ui.add_space(6.0);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!(
-                            "共 {}",
-                            molt_scan::human_bytes(pending.bytes)
-                        ))
-                        .size(p.sz(22.0))
-                        .strong(),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Extend),
-                );
-            });
-            ui.add_space(10.0);
-            egui::Frame::NONE
-                .fill(p.danger_soft)
-                .corner_radius(egui::CornerRadius::same(crate::theme::RADIUS_CONTROL))
-                .inner_margin(egui::Margin::symmetric(12, 9))
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new("这是永久删除，不可恢复。")
-                                .size(p.sz(12.5))
-                                .strong()
-                                .color(p.danger),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Wrap),
-                    );
-                    ui.add_space(3.0);
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new("删掉之后无法再还原到原位置。空间会立即释放。")
-                                .size(p.sz(11.5))
-                                .color(p.text_dim),
-                        )
-                        .wrap_mode(egui::TextWrapMode::Wrap),
-                    );
-                });
-            ui.add_space(10.0);
+    // 骨架交给 `components::confirm_dialog`：标题、量化、红底警示、按钮排布
+    // 都与首页「直接清理」那份共用。这一页只负责说清「删的是哪几项」。
+    let shown = 6;
+    let rows: Vec<(String, String)> = pending
+        .items
+        .iter()
+        .take(shown)
+        .map(|it| (it.original.display().to_string(), String::new()))
+        .collect();
 
-            egui::Frame::NONE
-                .fill(p.surface_alt)
-                .corner_radius(egui::CornerRadius::same(crate::theme::RADIUS_CONTROL))
-                .inner_margin(egui::Margin::symmetric(12, 10))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    for item in pending.items.iter().take(6) {
-                        ui.horizontal(|ui| {
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(4.0, p.sz(12.0)),
-                                egui::Sense::hover(),
-                            );
-                            ui.painter()
-                                .rect_filled(rect, egui::CornerRadius::same(2), p.danger);
-                            ui.add_space(7.0);
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(item.path.display().to_string())
-                                        .size(p.sz(11.0))
-                                        .monospace()
-                                        .color(p.text_dim),
-                                )
-                                .wrap_mode(egui::TextWrapMode::Truncate),
-                            );
-                        });
-                    }
-                    if pending.items.len() > 6 {
-                        ui.add_space(3.0);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("还有 {} 项", pending.items.len() - 6))
-                                    .size(p.sz(10.5))
-                                    .color(p.text_faint),
-                            )
-                            .wrap_mode(egui::TextWrapMode::Wrap),
-                        );
-                    }
-                });
+    let outcome = crate::components::ConfirmDialog::new(
+        "molt-confirm-purge",
+        crate::components::ConfirmKind::Danger,
+        "从临时空间彻底删除这些内容？",
+    )
+    .summary(format!(
+        "{} 项 · 共 {}",
+        pending.count(),
+        molt_scan::human_bytes(pending.bytes)
+    ))
+    .warning(
+        "这是永久删除，不可恢复。",
+        "删掉之后无法再还原到原位置。空间会立即释放。",
+    )
+    .confirm_label("确认彻底删除")
+    .width(440.0)
+    .show(ui, p, |ui| {
+        let rest = pending.items.len().saturating_sub(shown);
+        crate::components::confirm_dialog::item_list(
+            ui,
+            p,
+            true,
+            &rows,
+            (rest > 0).then(|| format!("还有 {rest} 项")),
+        );
+    });
 
-            ui.add_space(18.0);
-            ui.horizontal(|ui| {
-                if danger_button(ui, p, "确认彻底删除", true) {
-                    confirm = true;
-                }
-                if secondary_button(ui, p, "取消", true) {
-                    close = true;
-                }
-            });
-        });
-
-    if confirm {
-        do_purge(state);
-    } else if close {
-        state.pending_purge = None;
+    match outcome {
+        crate::components::ConfirmOutcome::Confirmed => acts.push(Action::RunPendingPurge),
+        crate::components::ConfirmOutcome::Cancelled => acts.push(Action::CancelPendingPurge),
+        crate::components::ConfirmOutcome::Open => {}
     }
+}
+
+fn restoring_view(ui: &mut egui::Ui, state: &AppState, p: &Palette) {
+    let (done, total) = match state.restore_job.as_ref().map(|j| j.peek()) {
+        Some(crate::worker::RestoreProgress::Working { done, total }) => (*done, *total),
+        _ => (0, 0),
+    };
+    ui.add_space(p.sz(40.0));
+    ui.vertical_centered(|ui| {
+        ui.set_max_width(p.sz(420.0));
+        ui.label(egui::RichText::new("正在还原…").size(p.sz(18.0)).strong());
+        ui.add_space(6.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!("共 {} 项，会放回原位置。", total.max(done)))
+                    .size(p.sz(12.0))
+                    .color(p.text_dim),
+            )
+            .wrap_mode(egui::TextWrapMode::Wrap),
+        );
+        ui.add_space(16.0);
+        crate::widgets::progress_bar(
+            ui,
+            p,
+            if total == 0 {
+                0.0
+            } else {
+                done as f32 / total as f32
+            },
+            p.sz(300.0),
+            "处理中",
+        );
+    });
 }
 
 fn purging_view(ui: &mut egui::Ui, state: &AppState, p: &Palette) {
@@ -743,20 +693,12 @@ pub fn restore(state: &mut AppState, id: i64) {
     crate::pages::history::reload(state);
 }
 
-/// 还原全部勾选项，逐条报告失败原因。
-fn restore_selected(state: &mut AppState) {
-    if !state.can_start() {
-        state.status = Some(StatusMessage::warn(
-            state.activity().blocking_hint().to_string(),
-        ));
-        return;
-    }
-    let ids: Vec<i64> = state
-        .quarantine
-        .iter()
-        .filter(|r| r.restorable && state.quarantine_checked.contains(&r.id))
-        .map(|r| r.id)
-        .collect();
+/// 批量还原给定的这些条目（后台执行）。
+///
+/// 只接收 id 列表，不自己从勾选里挑——挑选是 `Action::RestoreSelected`
+/// 在 `apply` 里做的。这样「用户选了哪些」与「执行了什么」是同一份数据，
+/// 不会在执行途中因为状态变化而偷偷改变。
+pub fn restore_ids(state: &mut AppState, ids: &[i64]) {
     if ids.is_empty() {
         return;
     }
@@ -768,45 +710,65 @@ fn restore_selected(state: &mut AppState) {
         }
     };
     let q = molt_act::Quarantine::new(crate::paths::quarantine_root(), "restore");
-    let exec = molt_act::Executor::new(store, q, crate::paths::DEFAULT_RETAIN_DAYS);
+    // 交给后台：解压几十 GB 的条目不把窗口卡住，进度由 `pump_restore` 回填。
+    // 任务存在期间 `activity()` 报「正在还原」，勾选与按钮自然置灰。
+    state.restore_job = Some(crate::worker::RestoreJob::start(ids.to_vec(), store, q));
+    state.status = Some(StatusMessage::info("正在还原…"));
+}
 
-    let mut ok = 0;
-    let mut failures = Vec::new();
-    for id in &ids {
-        match exec.restore(*id) {
-            Ok(_) => ok += 1,
-            Err(e) => failures.push((format!("编号 {id}"), e)),
+/// 取回后台还原的结果。由主循环每帧调用。
+pub fn pump_restore(state: &mut AppState) {
+    let Some(job) = state.restore_job.take() else {
+        return;
+    };
+    let mut job = job;
+    let progress = job.poll().clone();
+    match progress {
+        crate::worker::RestoreProgress::Done(report) => {
+            let failures = report.failures.len();
+            let kind = if report.restored == 0 {
+                crate::state::StatusKind::Error
+            } else if failures > 0 {
+                crate::state::StatusKind::Warn
+            } else {
+                crate::state::StatusKind::Info
+            };
+            let summary = if report.restored == 0 {
+                let first = report
+                    .failures
+                    .first()
+                    .map(|(n, r)| format!("{n}：{r}"))
+                    .unwrap_or_else(|| "没有可还原的内容".to_string());
+                format!("还原没有生效：{first}")
+            } else if failures > 0 {
+                format!(
+                    "已还原 {} 项；{failures} 项未还原，原因见下方",
+                    report.restored
+                )
+            } else {
+                format!("已还原 {} 项", report.restored)
+            };
+            state.status = Some(StatusMessage {
+                kind,
+                text: summary.clone(),
+            });
+            state.last_op = Some(std::sync::Arc::new(crate::state::OpReport {
+                summary,
+                done: report.restored,
+                done_bytes: 0,
+                failures: report.failures.clone(),
+                kind,
+                // 还原之后要去的地方就是这页的原位置：没有跨页入口。
+                next: None,
+            }));
+            state.clear_quarantine_selection();
+            reload(state);
+            crate::pages::history::reload(state);
+        }
+        _ => {
+            state.restore_job = Some(job);
         }
     }
-
-    state.last_op = Some(std::sync::Arc::new(crate::state::OpReport {
-        summary: if failures.is_empty() {
-            format!("已还原 {ok} 项")
-        } else {
-            format!("已还原 {ok} 项；{} 项未还原，原因见下方", failures.len())
-        },
-        done: ok,
-        done_bytes: 0,
-        kind: if failures.is_empty() {
-            crate::state::StatusKind::Info
-        } else if ok == 0 {
-            crate::state::StatusKind::Error
-        } else {
-            crate::state::StatusKind::Warn
-        },
-        failures,
-        // 还原之后要去的地方就是这页的原位置：没有跨页入口。
-        next: None,
-    }));
-    if let Some(op) = &state.last_op {
-        state.status = Some(StatusMessage {
-            kind: op.kind,
-            text: op.summary.clone(),
-        });
-    }
-    state.clear_quarantine_selection();
-    reload(state);
-    crate::pages::history::reload(state);
 }
 
 /// 执行隔离区彻底删除（后台）。
@@ -821,13 +783,9 @@ pub fn do_purge(state: &mut AppState) {
     let Some(pending) = state.pending_purge.clone() else {
         return;
     };
-    let ids: Vec<i64> = state
-        .quarantine
-        .iter()
-        .filter(|r| r.restorable && state.quarantine_checked.contains(&r.id))
-        .map(|r| r.id)
-        .collect();
-    let _ = &pending;
+    // 只认确认框里那一批的编号。确认之后用户改了勾选也不影响执行——
+    // 这行以前是重读 `quarantine_checked`，于是「确认 3 项」可能删掉 5 项。
+    let ids = pending.ids();
 
     if ids.is_empty() {
         state.pending_purge = None;
@@ -954,22 +912,6 @@ fn civil_days(iso: &str) -> Option<i64> {
     Some(era * 146_097 + doe - 719_468)
 }
 
-/// `2026-10-20T10:00:00Z` → `2026-10-20 10:00`。只用于展示，
-/// 解析不出来就原样返回，不编一个时间。
-fn short_time(iso: &str) -> String {
-    if iso.len() >= 16 {
-        format!("{} {}", &iso[0..10], &iso[11..16])
-    } else {
-        iso.to_string()
-    }
-}
-
-/// 让 `PendingItem` 的导入不算未使用——确认框里用到了它。
-#[allow(dead_code)]
-fn _pending_items(items: &[PendingItem]) -> usize {
-    items.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -984,11 +926,6 @@ mod tests {
             purge_after: "2026-10-27T10:00:00Z".into(),
             restorable,
         }
-    }
-
-    #[test]
-    fn short_time_keeps_the_date_and_minute() {
-        assert_eq!(short_time("2026-10-20T10:00:00Z"), "2026-10-20 10:00");
     }
 
     #[test]
@@ -1032,5 +969,98 @@ mod tests {
         // 失效的那条没有内容可删，不能混进待确认批次
         let p = s.pending_purge_from_checked().unwrap();
         assert_eq!(p.count(), 1);
+    }
+    /// 行尾的「还原」必须点得到。
+    ///
+    /// 整行点击区曾经盖住右栏按钮：点「还原」只会把整行勾上。
+    /// 这条按真正画出来的文字位置点，布局再改也能抓住同一件事。
+    #[test]
+    fn clicking_restore_in_a_row_asks_to_restore_that_row() {
+        fn walk(shape: &egui::epaint::Shape, out: &mut Vec<(String, egui::Pos2)>) {
+            match shape {
+                egui::epaint::Shape::Text(t) => out.push((t.galley.text().to_string(), t.pos)),
+                egui::epaint::Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        let p = crate::theme::Palette::light().with_scale(crate::theme::Theme::DEFAULT_SCALE);
+        let base = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1120.0, 900.0),
+            )),
+            ..Default::default()
+        };
+
+        let mut state = AppState::new("/Users/me".into());
+        state.quarantine = vec![row(1, true), row(2, true)];
+        let mut acts: Vec<Action> = Vec::new();
+
+        // 第一帧把页面画出来，拿到「还原」两个字的位置。
+        let mut texts: Vec<(String, egui::Pos2)> = Vec::new();
+        for _ in 0..2 {
+            texts.clear();
+            let mut out = ctx.run_ui(base.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    show(ui, &state, &p, &mut acts);
+                });
+            });
+            out.textures_delta.clear();
+            for cs in &out.shapes {
+                walk(&cs.shape, &mut texts);
+            }
+        }
+        let (_, pos) = texts
+            .iter()
+            .find(|(t, _)| t.trim() == "还原")
+            .expect("行尾必须有「还原」按钮");
+        // `pos` 是文字左上角，往右下挪一点落到按钮内部。
+        let click = egui::Pos2::new(pos.x + p.sz(6.0), pos.y + p.sz(6.0));
+
+        acts.clear();
+        let mut down = base.clone();
+        down.events = vec![
+            egui::Event::PointerMoved(click),
+            egui::Event::PointerButton {
+                pos: click,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ];
+        let mut up = base.clone();
+        up.events = vec![egui::Event::PointerButton {
+            pos: click,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        }];
+        for input in [down, up] {
+            let mut out = ctx.run_ui(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    show(ui, &state, &p, &mut acts);
+                });
+            });
+            out.textures_delta.clear();
+        }
+
+        assert!(
+            acts.iter().any(|a| matches!(a, Action::RestoreOne(1))),
+            "点行尾「还原」应请求还原第 1 行，实际动作：{acts:?}"
+        );
+        assert!(
+            !acts
+                .iter()
+                .any(|a| matches!(a, Action::ToggleQuarantineCheck(_))),
+            "点按钮不该被整行点击区抢走，变成勾选整行"
+        );
     }
 }

@@ -7,6 +7,7 @@
 
 use eframe::egui;
 
+use crate::icons;
 use crate::state::StatusKind;
 use crate::theme::{Palette, RADIUS_CARD, RADIUS_CONTROL, RADIUS_PILL};
 
@@ -18,6 +19,30 @@ use crate::theme::{Palette, RADIUS_CARD, RADIUS_CONTROL, RADIUS_PILL};
 /// 宽度一律撑满可用宽度。egui 的 `Frame::show` 默认按内容收缩，
 /// 结果是一张只有半屏宽的卡片贴在左边、右侧空出一大片——在宽窗口下
 /// 看起来像页面没加载完。内容该多宽由内容自己决定，而**块**应当占据整行。
+/// 无边框的一组内容：设置、自动清理这类页面用。
+///
+/// 卡片堆会把一页拆成好几张互不相干的纸；系统设置那种读法是标题 + 内容
+/// 直接排在页面上，组与组之间一条细线，扫起来才是一整页。内容里的标题
+/// 由调用方自己给（「状态」「什么时候跑」），这里只负责分隔。
+pub fn plain_section<R>(ui: &mut egui::Ui, p: &Palette, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let w = ui.available_width();
+    let out = ui
+        .scope(|ui| {
+            ui.set_width(w);
+            add(ui)
+        })
+        .inner;
+    ui.add_space(p.sz(14.0));
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0, p.row_separator),
+    );
+    ui.add_space(p.sz(14.0));
+    out
+}
+
 pub fn card<R>(
     ui: &mut egui::Ui,
     p: &Palette,
@@ -262,19 +287,40 @@ fn next_button(
                 return;
             }
 
-            ui.add_space(8.0);
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(format!(
-                        "{} 项未完成——其余 {} 项已照常处理：",
-                        op.failures.len(),
-                        op.done
-                    ))
-                    .size(p.sz(11.0))
-                    .color(p.text_dim),
-                )
-                .wrap_mode(egui::TextWrapMode::Wrap),
-            );
+            // 失败明细默认收起。这一段以前默认全展开、最多列 12 条，
+            // 于是清理结果列表还没出现，屏幕上先是一大块带完整路径与系统错误的橙色面板——
+            // 视觉权重比「清理本身」还高。用户当下只需要知道三件事：
+            // 有几项没成、为什么、下一步做什么，而前两件一行字就说得完。
+            let id = ui.make_persistent_id("op-report-details");
+            let mut open = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "{} 项未完成，其余 {} 项已照常处理",
+                            op.failures.len(),
+                            op.done
+                        ))
+                        .size(p.sz(11.0))
+                        .color(p.text_dim),
+                    )
+                    .wrap_mode(egui::TextWrapMode::Wrap),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if open {
+                        "收起明细 \u{25b4}".to_string()
+                    } else {
+                        "看是哪些 \u{25be}".to_string()
+                    };
+                    if secondary_button(ui, p, &label, true) {
+                        open = !open;
+                    }
+                });
+            });
+            if !open {
+                return;
+            }
             ui.add_space(4.0);
             // 失败明细全部列出，最多 12 条后折成一句：再多就不该在这个位置读了。
             for (path, reason) in op.failures.iter().take(12) {
@@ -320,6 +366,9 @@ fn next_button(
                     .wrap_mode(egui::TextWrapMode::Wrap),
                 );
             }
+            // 展开状态写回 egui 自己的内存：`op_report` 是纯组件（props 进、
+            // 动作出），不该为了一个折叠状态去读 AppState。
+            ui.data_mut(|d| d.insert_temp(id, open));
         });
 
     if action == ReportAction::None {
@@ -444,16 +493,82 @@ pub fn danger_button(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool) 
 /// 底栏如果直接放红色实心块，它会和主操作一样抢眼，用户就会先点它；
 /// 描边 + 危险色足够说明后果，又不会盖过默认路径。
 pub fn danger_ghost_button(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool) -> bool {
+    danger_ghost_button_sized(ui, p, text, 0.0, p.sz(30.0), enabled)
+}
+
+/// 同上，但宽度与高度由调用方定。
+///
+/// 并排的两个按钮必须一样高：主按钮 56 点、这个按内容高度会长到 30 点，
+/// 一行里一高一矮会被读成「一个是主操作、一个是被挤出来的边角」。
+/// 宽度也要能定——并排时两块加起来要正好等于原来主按钮那一行的宽度。
+pub fn danger_ghost_button_sized(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    text: &str,
+    width: f32,
+    height: f32,
+    enabled: bool,
+) -> bool {
     let fg = if enabled { p.danger } else { p.text_faint };
     let btn = egui::Button::new(egui::RichText::new(text).size(p.sz(12.5)).color(fg))
         .corner_radius(egui::CornerRadius::same(RADIUS_CONTROL))
-        .min_size(egui::vec2(0.0, p.sz(30.0)))
+        .min_size(egui::vec2(width, height))
         .fill(egui::Color32::TRANSPARENT)
         .stroke(egui::Stroke::new(
             1.0,
             if enabled { p.danger } else { p.border },
         ));
     ui.add_enabled(enabled, btn).clicked()
+}
+
+/// 一个关闭叉号。悬浮提示条、窄条上用它代替「知道了」三个字。
+///
+/// 自绘而不是用字符 `✕`：默认字体里没有这个字形时会画成豆腐块，
+/// 而这套界面已经为同类原因自绘了全部顶栏图标。
+pub fn close_button(ui: &mut egui::Ui, p: &Palette, tooltip: &str) -> bool {
+    let mut rect = egui::Rect::NOTHING;
+    close_button_impl(ui, p, tooltip, Some(&mut rect))
+}
+
+/// 同上，额外把控件占的矩形回传给调用方。
+///
+/// 给测试用：要往叉号中心送指针事件，就得先知道它画在哪。
+/// 测试里写死坐标，只要内边距或字号动一下就会点到别处而照样变绿。
+pub fn close_button_probe(ui: &mut egui::Ui, p: &Palette, rect_out: &mut egui::Rect) -> bool {
+    close_button_impl(ui, p, "", Some(rect_out))
+}
+
+fn close_button_impl(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    tooltip: &str,
+    rect_out: Option<&mut egui::Rect>,
+) -> bool {
+    let side = p.sz(26.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    if let Some(slot) = rect_out {
+        *slot = rect;
+    }
+    if resp.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(RADIUS_CONTROL),
+            p.surface_alt,
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let c = rect.center();
+    let k = p.sz(4.2);
+    let stroke = egui::Stroke::new(p.sz(1.6), p.text_dim);
+    ui.painter()
+        .line_segment([c + egui::vec2(-k, -k), c + egui::vec2(k, k)], stroke);
+    ui.painter()
+        .line_segment([c + egui::vec2(k, -k), c + egui::vec2(-k, k)], stroke);
+    if tooltip.is_empty() {
+        resp.clicked()
+    } else {
+        resp.on_hover_text(tooltip).clicked()
+    }
 }
 
 /// 分段控件：几个互斥选项并排，当前项用实心强调色。
@@ -788,12 +903,16 @@ pub enum NavIcon {
     Gauge,
     /// 收纳箱：临时空间
     Archive,
+    /// 立方体：卸载（一个拔出来的方块，不是箱子、不是钟）
+    Box,
     /// 时钟：历史
     Clock,
     /// 日历：自动清理
     Calendar,
     /// 齿轮：设置
     Gear,
+    /// 扳手：工具（随手用的功能，不属于任何一页）
+    Wrench,
 }
 
 /// 一个顶栏图标按钮：药丸底 + 图形 + 可选角标。
@@ -811,11 +930,17 @@ pub fn nav_icon(
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
     let color = if selected { p.reclaimable } else { p.text_dim };
     if selected {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(RADIUS_CONTROL), p.accent_soft);
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(RADIUS_CONTROL),
+            p.accent_soft,
+        );
     } else if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(RADIUS_CONTROL), p.surface_hover);
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(RADIUS_CONTROL),
+            p.surface_hover,
+        );
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -823,23 +948,58 @@ pub fn nav_icon(
     draw_nav_icon(ui.painter(), p, icon, rect.center(), color);
 
     // 角标：有东西 / 某个开关开着，不点进去也看得见。
-    // 空串表示「只画一个点」——定时清理开着是个状态，不是一个数量。
+    //
+    // 画在图标框**内部**的右上角，并且按文字宽度撑成胶囊：之前它从框顶向外
+    // 挑出近 10 点、又固定用 7 点半径的圆，于是既被顶栏上沿切掉一截，
+    // 又把三位数「786」的最后一个数字裁掉——用户看到的就是「icon 都被截断了」。
     if let Some(b) = badge {
-        let c = rect.right_top() + egui::vec2(-p.sz(2.0), p.sz(2.0));
-        if b.is_empty() {
-            ui.painter().circle_filled(c, p.sz(3.0), p.reclaimable);
+        let painter = ui.painter();
+        let ring = if selected {
+            p.accent_soft
+        } else if resp.hovered() {
+            p.surface_hover
         } else {
-            // 先垫一圈底色：角标会压在药丸描边和图形上，不垫就读不清
-            ui.painter()
-                .circle_filled(c, p.sz(8.5), p.surface);
-            ui.painter().circle_filled(c, p.sz(7.0), p.reclaimable);
-            ui.painter().text(
-                c,
-                egui::Align2::CENTER_CENTER,
-                b,
-                egui::FontId::proportional(p.sz(9.0)),
+            p.surface
+        };
+        if b.is_empty() {
+            // 定时清理开着是个状态，不是一个数量，只画一个点
+            let c = rect.right_top() + egui::vec2(-p.sz(7.0), p.sz(7.0));
+            painter.circle_filled(c, p.sz(4.4), ring);
+            painter.circle_filled(c, p.sz(3.0), p.reclaimable);
+        } else {
+            let max_w = side - p.sz(2.0);
+            let mut font = p.sz(9.0);
+            let mut galley = painter.layout_no_wrap(
+                b.to_owned(),
+                egui::FontId::proportional(font),
                 p.on_accent(),
             );
+            // 角标高度压到 12 点、并向上抬 3 点：原来的 14 点胶囊整块压在图形
+            // 右上角，「53」「795」这类两位以上的数字会把图标盖掉大半，
+            // 看上去又像「图标只画了一部分」。抬到框沿之上，图形中心就露出来了。
+            let mut h = p.sz(12.0).max(font + p.sz(2.0));
+            let mut w = (galley.size().x + p.sz(6.0)).max(h);
+            if w > max_w {
+                // 位数多到放不下时缩字号，而不是把末位裁掉
+                let k = max_w / w;
+                font *= k;
+                h *= k;
+                w = max_w;
+                galley = painter.layout_no_wrap(
+                    b.to_owned(),
+                    egui::FontId::proportional(font),
+                    p.on_accent(),
+                );
+            }
+            let pill = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - w, rect.top() - p.sz(3.0)),
+                egui::vec2(w, h),
+            );
+            let radius = egui::CornerRadius::same((h / 2.0).round().min(255.0) as u8);
+            // 先垫一圈框底色：胶囊压在图形上，不垫就读不清
+            painter.rect_filled(pill.expand(p.sz(1.2)), radius, ring);
+            painter.rect_filled(pill, radius, p.reclaimable);
+            painter.galley(pill.center() - galley.size() / 2.0, galley, p.on_accent());
         }
     }
     resp
@@ -853,68 +1013,28 @@ fn draw_nav_icon(
     center: egui::Pos2,
     color: egui::Color32,
 ) {
-    let k = p.scale;
-    // (0,0) 是 20×20 方框的左上角，(10,10) 是中心——下面所有坐标按这个格子写
-    let at = |x: f32, y: f32| center + egui::vec2((x - 10.0) * k, (y - 10.0) * k);
-    let stroke = egui::Stroke::new(p.sz(1.6), color);
-    let r = |v: f32| v * k;
-    let boxed = |x0: f32, y0: f32, x1: f32, y1: f32, radius: f32| {
-        painter.rect_stroke(
-            egui::Rect::from_min_max(at(x0, y0), at(x1, y1)),
-            egui::CornerRadius::same((radius * k) as u8),
-            stroke,
-            egui::StrokeKind::Inside,
-        )
+    // 全部走 Phosphor 图标字体，不再拿 `line_segment` 一条条凑形状。
+    //
+    // 手绘的那一版每个图标要十几行坐标，缩到 34 点后曲率与接缝都不对：
+    // 圆环的缺口被读成「只画了一半」，方块靠倾斜角度才分得清彼此。
+    // 图标库里七枚是同一套粗细与圆角，排在一起才像一套东西——
+    // 而这一行正是全窗口最常被扫过的一行。
+    let glyph = match icon {
+        NavIcon::Gauge => icons::GAUGE,
+        NavIcon::Archive => icons::ARCHIVE_TRAY,
+        NavIcon::Box => icons::CUBE,
+        NavIcon::Clock => icons::CLOCK,
+        NavIcon::Calendar => icons::CALENDAR_BLANK,
+        NavIcon::Gear => icons::GEAR,
+        NavIcon::Wrench => icons::WRENCH,
     };
-
-    match icon {
-        NavIcon::Gauge => {
-            // 240° 的缺口弧：150° 起、顺时针扫到 30°。钟表读法，0° 在 12 点。
-            // 缺口朝下，和齿轮那种闭合圆一眼就分得开。
-            let pts: Vec<egui::Pos2> = (0..=24)
-                .map(|i| {
-                    let deg = 150.0 + 240.0 * (i as f32 / 24.0);
-                    let (s, c) = (deg.to_radians().sin(), deg.to_radians().cos());
-                    center + egui::vec2(s * r(7.6), -c * r(7.6))
-                })
-                .collect();
-            painter.add(egui::Shape::line(pts, stroke));
-            let (s, c) = (45.0f32.to_radians().sin(), 45.0f32.to_radians().cos());
-            painter.line_segment(
-                [center, center + egui::vec2(s * r(4.6), -c * r(4.6))],
-                stroke,
-            );
-            painter.circle_filled(center, r(1.3), color);
-        }
-        NavIcon::Archive => {
-            boxed(2.0, 7.0, 18.0, 17.0, 2.0);
-            // 箱盖缝：一条横线，让「箱体」与「盖子」分开
-            painter.line_segment([at(2.0, 7.0), at(18.0, 7.0)], stroke);
-            boxed(7.0, 4.0, 13.0, 7.0, 1.5);
-        }
-        NavIcon::Clock => {
-            painter.circle_stroke(center, r(7.6), stroke);
-            painter.line_segment([center, at(10.0, 4.6)], stroke);
-            painter.line_segment([center, at(14.2, 10.0)], stroke);
-        }
-        NavIcon::Calendar => {
-            boxed(2.0, 5.0, 18.0, 17.0, 2.0);
-            // 表头线：日历和「一个方框」的差别全靠这一条
-            painter.line_segment([at(2.0, 9.0), at(18.0, 9.0)], stroke);
-            painter.line_segment([at(6.5, 2.5), at(6.5, 6.0)], stroke);
-            painter.line_segment([at(13.5, 2.5), at(13.5, 6.0)], stroke);
-        }
-        NavIcon::Gear => {
-            painter.circle_stroke(center, r(3.4), stroke);
-            // 八根外刺：闭合小圆 + 外刺，和仪表盘那道缺口弧轮廓差别很大
-            for i in 0..8 {
-                let deg = i as f32 * 45.0;
-                let (s, c) = (deg.to_radians().sin(), deg.to_radians().cos());
-                let dir = egui::vec2(s, -c);
-                painter.line_segment([center + dir * r(5.0), center + dir * r(7.6)], stroke);
-            }
-        }
-    }
+    painter.text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        icons::font(p.sz(19.0)),
+        color,
+    );
 }
 
 /// 一段清单前的分节标题：左边一句「这是什么档」，右边数量与体积。
@@ -986,6 +1106,297 @@ pub fn ai_note(ui: &mut egui::Ui, p: &Palette, text: &str) {
 /// 量的时候乘 `p.sz()`、画的时候不乘，排出来就会错位。
 pub fn dot_size() -> f32 {
     7.0
+}
+
+// ─── 访达式工作台的组件 ─────────────────────────────────────────────────
+
+/// 侧栏的一项：图标 + 中文名常显 + 可选角标。
+///
+/// 中文名直接写在图标右边，不再藏进悬停提示——侧栏的宽度本来就是留给
+/// 名字的，认页不该靠记形状。窄窗由 `sidebar` 统一收成只显图标的列，
+/// 那里才走悬停提示。
+pub fn sidebar_item(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    icon: NavIcon,
+    title: &str,
+    selected: bool,
+    badge: Option<&str>,
+) -> egui::Response {
+    let h = p.sz(30.0);
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    if selected {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(RADIUS_CONTROL),
+            p.accent_soft,
+        );
+    } else if resp.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(RADIUS_CONTROL),
+            p.surface_hover,
+        );
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let color = if selected { p.reclaimable } else { p.text_dim };
+    let center = rect.left_center() + egui::vec2(p.sz(18.0), 0.0);
+    draw_nav_icon(ui.painter(), p, icon, center, color);
+    let text_color = if selected { p.text } else { p.text_dim };
+    ui.painter().text(
+        rect.left_center() + egui::vec2(p.sz(32.0), 0.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(p.sz(12.5)),
+        text_color,
+    );
+    // 角标：贴在条目右沿，数字与「开着」的圆点两种形态与顶栏一致。
+    if let Some(b) = badge {
+        let painter = ui.painter();
+        if b.is_empty() {
+            painter.circle_filled(
+                rect.right_center() - egui::vec2(p.sz(12.0), 0.0),
+                p.sz(3.0),
+                p.reclaimable,
+            );
+        } else {
+            let galley = painter.layout_no_wrap(
+                b.to_owned(),
+                egui::FontId::proportional(p.sz(10.0)),
+                p.text_faint,
+            );
+            painter.galley(
+                egui::pos2(
+                    rect.right() - p.sz(10.0) - galley.size().x,
+                    rect.center().y - galley.size().y / 2.0,
+                ),
+                galley,
+                p.text_faint,
+            );
+        }
+    }
+    resp
+}
+
+/// 首页顶部的一行摘要：容量条 + 「可用 / 可清理」两个数字 + 重新扫描 + 状态。
+///
+/// 它取代了圆环仪表盘：盘还剩多少、能清多少，用户读两个数字就够了，
+/// 不该为这件事牺牲一整屏。返回true表示用户点了「重新扫描」。
+#[allow(clippy::too_many_arguments)]
+pub fn summary_strip(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    used_ratio: f32,
+    available: &str,
+    cleanable: Option<(&str, usize)>,
+    scanning: bool,
+    can_start: bool,
+    activity: &str,
+    scan_note: &str,
+) -> bool {
+    let mut rescan = false;
+    card(ui, p, |ui| {
+        ui.horizontal(|ui| {
+            // 细容量条：比例留给它，数值交给文字——条只管「用了几成」。
+            let w = p.sz(150.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(w, p.sz(30.0)),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    let bw = ui.available_width();
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(bw, p.sz(8.0)), egui::Sense::hover());
+                    let r = egui::CornerRadius::same(4);
+                    ui.painter().rect_filled(rect, r, p.surface_alt);
+                    let f = used_ratio.clamp(0.0, 1.0);
+                    if f > 0.0 {
+                        let filled = egui::Rect::from_min_size(
+                            rect.min,
+                            egui::vec2((rect.width() * f).max(3.0), rect.height()),
+                        );
+                        ui.painter().rect_filled(filled, r, p.used_bar);
+                    }
+                },
+            );
+            ui.add_space(p.sz(6.0));
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("可用 {available}"))
+                        .size(p.sz(12.5))
+                        .strong()
+                        .color(p.text),
+                )
+                .wrap_mode(egui::TextWrapMode::Extend),
+            );
+            if let Some((bytes, n)) = cleanable {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("可清理 {bytes} · {n} 项"))
+                            .size(p.sz(12.5))
+                            .color(p.reclaimable),
+                    )
+                    .wrap_mode(egui::TextWrapMode::Extend),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if scanning {
+                    "扫描中…"
+                } else {
+                    "重新扫描"
+                };
+                if secondary_button(ui, p, label, can_start) {
+                    rescan = true;
+                }
+                if !activity.is_empty() {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(activity)
+                                .size(p.sz(10.5))
+                                .color(p.costly),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Truncate),
+                    );
+                } else if !scan_note.is_empty() {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(scan_note)
+                                .size(p.sz(10.5))
+                                .color(p.text_faint),
+                        )
+                        .wrap_mode(egui::TextWrapMode::Truncate),
+                    );
+                }
+            });
+        });
+    });
+    rescan
+}
+
+/// 清单里的一条「为什么」：判定理由用判定色，次要路径用弱色。
+///
+/// 放在行内第二行，而不是和名字挤同一行——大字号下那行会塞不下。
+pub fn why_text(ui: &mut egui::Ui, p: &Palette, text: &str, color: egui::Color32) {
+    ui.add(
+        egui::Label::new(egui::RichText::new(text).size(p.sz(10.5)).color(color))
+            .wrap_mode(egui::TextWrapMode::Truncate),
+    );
+}
+
+/// 右侧详情抽屉。只读：摆一行放不下的完整信息，动作仍留在清单与底栏。
+///
+/// 用 `Area` 钉在内容区右沿，不是弹窗——弹窗会挡住清单，而用户看详情时
+/// 常常还要对照着勾别的行。Esc 或点外面关闭。
+///
+/// `rows` 是 (标签, 值) 对，值的展示色由调用方定则太多，这里统一次要色、
+/// 让判定色只出现在「判定」那一行（它由 `verdict` 单独给）。
+#[allow(clippy::too_many_arguments)]
+pub fn detail_drawer(
+    ctx: &egui::Context,
+    p: &Palette,
+    title: &str,
+    verdict: (&str, egui::Color32, egui::Color32),
+    rows: &[(String, String)],
+    note: Option<&str>,
+    can_reveal: bool,
+) -> DetailDrawerOutcome {
+    let mut out = DetailDrawerOutcome::None;
+    let screen = ctx.content_rect();
+    let w = p.sz(300.0).min(screen.width() - p.sz(40.0));
+    // 离窗口边缘留一点：贴边会读成一条栏，浮起来才像「简介」。
+    let m = p.sz(8.0);
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(screen.right() - w - m, screen.top() + m),
+        egui::pos2(screen.right() - m, screen.bottom() - m),
+    );
+    // 不铺暗化层、不拦截点击：用户看简介时常常还要对照着勾别的行、
+    // 或者直接按底栏执行。暗化层会把整张清单的点击全吃掉。关闭靠叉号与 Esc。
+    egui::Area::new(egui::Id::unique("detail-drawer"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(p.surface)
+                .stroke(egui::Stroke::new(1.0, p.border))
+                .inner_margin(egui::Margin::symmetric(18, 16))
+                .show(ui, |ui| {
+                    ui.set_width(w - 36.0);
+                    ui.set_max_height(rect.height() - 32.0);
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(title).size(p.sz(15.0)).strong())
+                                .wrap_mode(egui::TextWrapMode::Truncate),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if close_button(ui, p, "关闭") {
+                                out = DetailDrawerOutcome::Close;
+                            }
+                        });
+                    });
+                    ui.add_space(p.sz(6.0));
+                    badge(ui, p, verdict.0, verdict.1, verdict.2);
+                    ui.add_space(p.sz(10.0));
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for (k, v) in rows {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(k).size(p.sz(10.5)).color(p.text_faint),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(v).size(p.sz(12.0)).color(p.text_dim),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                            ui.add_space(p.sz(8.0));
+                        }
+                        if let Some(n) = note {
+                            hairline(ui, p);
+                            ui.add_space(p.sz(4.0));
+                            ai_note(ui, p, n);
+                        }
+                        if can_reveal {
+                            ui.add_space(p.sz(10.0));
+                            if secondary_button(ui, p, "在访达中显示", true) {
+                                out = DetailDrawerOutcome::Reveal;
+                            }
+                        }
+                    });
+                });
+        });
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        out = DetailDrawerOutcome::Close;
+    }
+    out
+}
+
+/// 详情抽屉这一帧想干什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailDrawerOutcome {
+    None,
+    Close,
+    Reveal,
+}
+
+/// 危险动作的文字级入口：红色文字、无底无边、字号小一档。
+///
+/// 不可恢复的路要让找它的人找得到，但不能和主按钮平起平坐——
+/// 平起平坐的结果是它先被点到（10-23 那次误删就是两个并排大按钮）。
+pub fn danger_text_button(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: bool) -> bool {
+    let color = if enabled { p.danger } else { p.text_faint };
+    let resp = ui.add_enabled(
+        enabled,
+        egui::Button::new(egui::RichText::new(text).size(p.sz(11.5)).color(color))
+            .fill(egui::Color32::TRANSPARENT),
+    );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
 }
 
 #[cfg(test)]

@@ -39,6 +39,126 @@ pub struct ScanResult {
     pub denied_roots: Vec<String>,
     /// 这次扫描耗时，秒
     pub elapsed_secs: f32,
+    /// 这份结果是**上次**扫描留下的缓存，不是刚刚扫的。
+    ///
+    /// 界面据此写「上次扫描的结果」而不是假装是最新的——数字可能已经过时，
+    /// 而清理页上的每个数字都会引出一次删除动作，不能让它冒充实时。
+    pub from_cache: bool,
+}
+
+/// 落盘用的形状。与 `ScanResult` 分开，因为 `elapsed_secs`/`from_cache`
+/// 这类字段是「这一次运行」的元信息，不该跟着历史进文件。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedScan {
+    /// 写这份缓存的时间（unix 秒）
+    at: u64,
+    items: Vec<molt_core::Candidate>,
+    rule_ids: Vec<String>,
+    denied_roots: Vec<String>,
+}
+
+impl ScanResult {
+    /// 把结果写进缓存文件。
+    ///
+    /// 失败一律忽略：缓存是加速手段，写不进去只意味着下次还得多扫一遍，
+    /// 不该因此给用户报错。
+    pub fn save_cache(&self, path: &std::path::Path) {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let cached = CachedScan {
+            at,
+            items: self.items.clone(),
+            rule_ids: self.rule_ids.clone(),
+            denied_roots: self.denied_roots.clone(),
+        };
+        let Ok(json) = serde_json::to_vec(&cached) else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, json);
+    }
+
+    /// 读回上次的扫描结果，连同它**扫出来的时刻**（`HH:MM`）。
+    ///
+    /// 时刻要跟着结果一起回来：页面上要写「上面是 10:34 那次扫描的结果」，
+    /// 拿「现在」去顶会让那句话和数字互相矛盾。
+    ///
+    /// 过期就丢掉：超过 `max_age` 的缓存不再代表现在的磁盘，显示它比显示
+    /// 「正在扫描…」更糟——用户会照着过时的数字做决定。
+    pub fn load_cache(
+        path: &std::path::Path,
+        max_age: std::time::Duration,
+    ) -> Option<(ScanResult, String)> {
+        let raw = std::fs::read(path).ok()?;
+        let cached: CachedScan = serde_json::from_slice(&raw).ok()?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // `max_age` 为零是唯一要特判的一档（「不接受任何缓存」），
+        // 因为刚写下的缓存 `now - at` 也是 0，用 `>` 会把它放过去。
+        let too_old = if max_age.is_zero() {
+            true
+        } else {
+            now.saturating_sub(cached.at) > max_age.as_secs()
+        };
+        if too_old {
+            return None;
+        }
+        Some((
+            ScanResult {
+                items: cached.items,
+                rule_ids: cached.rule_ids,
+                denied_roots: cached.denied_roots,
+                elapsed_secs: 0.0,
+                from_cache: true,
+            },
+            hhmm_from_unix(cached.at),
+        ))
+    }
+}
+
+/// unix 秒 → 本地 `HH:MM`。
+///
+/// 复用 `molt_act` 那份 epoch→ISO 的换算（项目里已有、也测过），再套一层
+/// 本机时区偏移。为了一句「上次是几点」不值得引 chrono，更不该为此起子进程。
+fn hhmm_from_unix(secs: u64) -> String {
+    // ISO 是 UTC（结尾 Z）。页面写给人看，要换成本地时间。
+    let utc_min = (secs % 86_400) / 60;
+    let total = (utc_min as i64 + local_offset_minutes()).rem_euclid(24 * 60);
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+/// 本机相对 UTC 的分钟偏移（北京是 +480）。
+fn local_offset_minutes() -> i64 {
+    // 标准库的 SystemTime 不带时区，只能问系统。`%z` 形如 `+0800`。
+    std::process::Command::new("date")
+        .arg("+%z")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| parse_tz_offset(s.trim()))
+        .unwrap_or(0)
+}
+
+/// `+0800` / `-0530` → 分钟数。解析不出返回 `None`，由调用方退回 0（UTC）。
+fn parse_tz_offset(s: &str) -> Option<i64> {
+    if s.len() != 5 {
+        return None;
+    }
+    let sign = match s.as_bytes()[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let h: i64 = s[1..3].parse().ok()?;
+    let m: i64 = s[3..5].parse().ok()?;
+    Some(sign * (h * 60 + m))
 }
 
 impl ScanResult {
@@ -312,6 +432,82 @@ impl PurgeJob {
     }
 }
 
+/// 批量还原隔离区条目。
+///
+/// 与 `PurgeJob` 同形：每还原一条发一次进度，界面据此更新文字与进度条。
+/// 还原可能涉及解压几十 GB，同步跑会把窗口卡到没有任何反馈。
+pub struct RestoreJob {
+    rx: Receiver<RestoreProgress>,
+    latest: RestoreProgress,
+    finished: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum RestoreProgress {
+    Working { done: usize, total: usize },
+    Done(Arc<RestoreReport>),
+}
+
+/// 批量还原的结果。
+#[derive(Debug, Clone, Default)]
+pub struct RestoreReport {
+    pub restored: usize,
+    /// (展示名, 原因)
+    pub failures: Vec<(String, String)>,
+}
+
+impl RestoreJob {
+    pub fn start(
+        ids: Vec<i64>,
+        store: molt_act::AuditStore,
+        quarantine: molt_act::Quarantine,
+    ) -> Self {
+        let total = ids.len();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(RestoreProgress::Working { done: 0, total });
+            let exec = molt_act::Executor::new(store, quarantine, 0);
+            let mut failures = Vec::new();
+            for (done, id) in ids.iter().enumerate() {
+                if let Err(e) = exec.restore(*id) {
+                    failures.push((format!("编号 {id}"), e));
+                }
+                let _ = tx.send(RestoreProgress::Working {
+                    done: done + 1,
+                    total,
+                });
+            }
+            let _ = tx.send(RestoreProgress::Done(Arc::new(RestoreReport {
+                restored: total - failures.len(),
+                failures,
+            })));
+        });
+        Self {
+            rx,
+            latest: RestoreProgress::Working { done: 0, total },
+            finished: false,
+        }
+    }
+
+    pub fn poll(&mut self) -> &RestoreProgress {
+        while let Ok(p) = self.rx.try_recv() {
+            self.latest = p;
+        }
+        if matches!(self.latest, RestoreProgress::Done(_)) {
+            self.finished = true;
+        }
+        &self.latest
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    pub fn peek(&self) -> &RestoreProgress {
+        &self.latest
+    }
+}
+
 impl CleanJob {
     /// 开一个后台清理。`candidates` 是用户在界面上选中的那些。
     pub fn start(
@@ -372,6 +568,208 @@ impl CleanJob {
     }
 }
 
+/// 枚举已装应用与残留的后台任务。
+///
+/// 分三段发消息，是为了让界面**立刻有事可看**：
+///
+/// 1. [`AppScanProgress::Listed`] —— 名字、路径、图标都在了，只是体积还没量
+/// 2. [`AppScanProgress::Measured`] —— 某个应用的体积量好了，界面按路径填进去
+/// 3. [`AppScanProgress::Done`] —— 残留也找完了，整页到此为止
+///
+/// 以前是一条消息到底：要等每个 bundle 的几万个文件全数完、每个应用的
+/// `~/Library` 全查完才一次性出现。用户点进卸载页看到的是几秒空白，
+/// 而这段时间正是「为什么列个应用这么卡」的来源。
+pub struct AppScanJob {
+    rx: Receiver<AppScanProgress>,
+    latest: AppScanProgress,
+    finished: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum AppScanProgress {
+    /// 清单出来了，体积待补
+    Listed {
+        apps: Vec<molt_act::AppEntry>,
+        scanned_dirs: Vec<String>,
+    },
+    /// 一个应用的体积量好了
+    Measured { path: String, bytes: u64 },
+    /// 残留也找完了
+    Done(Arc<AppScanResult>),
+}
+
+/// 应用列表 + 每个应用的残留。
+#[derive(Debug, Clone, Default)]
+pub struct AppScanResult {
+    pub apps: Vec<molt_act::AppEntry>,
+    pub scanned_dirs: Vec<String>,
+}
+
+/// 一个应用的残留盘点，按需启动。
+///
+/// 为什么单独一条任务：残留扫描在个别应用上会慢到不可接受（见
+/// [`AppScanJob::start`] 里的注释）。它只在用户点开某个应用时才需要，
+/// 所以从「列出全部应用」里拆出来——列出永远是快的，点开某一个慢也只慢那一个，
+/// 而且能显示「正在找残留…」而不是把整个页面拖住。
+pub struct LeftoverJob {
+    rx: Receiver<Vec<molt_act::Leftover>>,
+    /// 这次是为了哪个应用扫的：结果回来时页面可能已经展开了别的应用。
+    pub app_path: String,
+    done: bool,
+}
+
+impl LeftoverJob {
+    pub fn start(app: molt_act::AppEntry, home: String) -> Self {
+        let (tx, rx) = channel();
+        let app_path = app.path.display().to_string();
+        std::thread::spawn(move || {
+            let l = molt_act::uninstall::leftovers_for(&app, &home);
+            let _ = tx.send(l);
+        });
+        Self {
+            rx,
+            app_path,
+            done: false,
+        }
+    }
+
+    pub fn poll(&mut self) -> Option<Vec<molt_act::Leftover>> {
+        match self.rx.try_recv() {
+            Ok(l) => {
+                self.done = true;
+                Some(l)
+            }
+            Err(_) => None,
+        }
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.done
+    }
+}
+
+impl AppScanJob {
+    pub fn start(home: String) -> Self {
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let dirs = molt_act::uninstall::app_dirs(&home);
+            // 第一段：只读元信息，不等体积。图标与名字在这一步就齐了。
+            let mut apps = molt_act::uninstall::list_apps(&dirs);
+            let scanned_dirs: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+            let _ = tx.send(AppScanProgress::Listed {
+                apps: apps.clone(),
+                scanned_dirs: scanned_dirs.clone(),
+            });
+
+            // 第二段：体积并行量。每条量好就发一条，界面按路径填。
+            //
+            // 线程数按可用核数封顶：量体积是 IO + metadata 密集的活，
+            // 开太多只会互相抢盘；而每个 bundle 动辄几万文件，
+            // 串行是这次卡顿的主因。
+            let paths: Vec<(String, std::path::PathBuf)> = apps
+                .iter()
+                .map(|a| (a.path.display().to_string(), a.path.clone()))
+                .collect();
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .clamp(2, 8);
+            let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            // 量到的体积要同时**写回 `apps`**，不能只发消息了事。
+            // `Done` 带的是这份 `apps`：以前它上面的 `bytes` 一直是列清单时的 0，
+            // 界面收到 `Done` 又按它覆盖一遍，于是逐条量好的数字全被冲回 0、
+            // 每个格子永远停在「正在量…」。这里用互斥锁收结果，join 之后再写。
+            let measured: std::sync::Arc<std::sync::Mutex<Vec<(usize, u64)>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut handles = Vec::with_capacity(workers);
+            for _ in 0..workers {
+                let tx = tx.clone();
+                let paths = paths.clone();
+                let next = next.clone();
+                let measured = measured.clone();
+                handles.push(std::thread::spawn(move || loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((key, path)) = paths.get(i) else {
+                        break;
+                    };
+                    let bytes = molt_act::uninstall::measure_path(path);
+                    if let Ok(mut m) = measured.lock() {
+                        m.push((i, bytes));
+                    }
+                    let _ = tx.send(AppScanProgress::Measured {
+                        path: key.clone(),
+                        bytes,
+                    });
+                }));
+            }
+            for h in handles {
+                let _ = h.join();
+            }
+            if let Ok(m) = measured.lock() {
+                for &(i, bytes) in m.iter() {
+                    if let Some(app) = apps.get_mut(i) {
+                        app.bytes = bytes;
+                    }
+                }
+            }
+
+            molt_act::uninstall::sort_by_bytes(&mut apps);
+
+            // 残留**不在这里扫**。
+            //
+            // 以前这里会逐个应用遍历 `~/Library` 的十几条候选路径、并对每条
+            // 递归量体积。代价极不均匀：本机一个 Clash Verge 的
+            // `Group Containers/io.github.clash-verge-rev.clash-verge-rev`
+            // 单次遍历就超过 600 秒没跑完——而这是「列个应用」必须等的事，
+            // 于是整页卡死。而残留只在**点开某个应用**时才需要看，
+            // 现在就放到 [`LeftoverJob`] 里按需扫。
+            let result = AppScanResult { apps, scanned_dirs };
+            let _ = tx.send(AppScanProgress::Done(Arc::new(result)));
+        });
+        Self {
+            rx,
+            latest: AppScanProgress::Listed {
+                apps: Vec::new(),
+                scanned_dirs: Vec::new(),
+            },
+            finished: false,
+        }
+    }
+
+    pub fn poll(&mut self) -> &AppScanProgress {
+        while let Ok(p) = self.rx.try_recv() {
+            self.latest = p;
+        }
+        if matches!(self.latest, AppScanProgress::Done(_)) {
+            self.finished = true;
+        }
+        &self.latest
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    /// 把这一帧攒下的消息全部取出来，一条不丢。
+    ///
+    /// [`Self::poll`] 只保留最新一条，够用于「进度到哪了」，但体积是逐条到的：
+    /// 丢掉一条就会有一个格子的体积永远停在 0。所以这个任务走 `drain`。
+    pub fn drain(&mut self) -> Vec<AppScanProgress> {
+        let mut out = Vec::new();
+        while let Ok(p) = self.rx.try_recv() {
+            if matches!(p, AppScanProgress::Done(_)) {
+                self.finished = true;
+            }
+            out.push(p);
+        }
+        out
+    }
+
+    pub fn peek(&self) -> &AppScanProgress {
+        &self.latest
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +777,79 @@ mod tests {
 
     fn cand(bytes: u64, v: Verdict) -> molt_core::Candidate {
         molt_core::Candidate::new("/x", ItemKind::Dir, v).with_size(bytes, bytes, 1)
+    }
+
+    /// 列举应用之后，`Done` 里带的必须是**量到的真实体积**。
+    ///
+    /// 这一条抓的是 2026-10-28 那个 bug：背景线程量完体积只发了一条消息，
+    /// 从没写回 `apps`，于是 `Done` 带回的全是列清单时的 0；界面收到它又按
+    /// 这份 0 覆盖一遍，逐条量好的数字全被冲掉——每个格子永远停在「正在量…」。
+    /// 所以在**假家目录里**真跑一遍整个任务，断言终局的体积非 0，
+    /// 并且逐条消息里也能拿到同一个数。
+    ///
+    /// 真 `/Applications` 也会被列进来（那是只读的），这里只断言自己造的那一个，
+    /// 免得测试依赖本机装了什么。
+    #[test]
+    fn app_scan_reports_measured_sizes_in_the_final_result() {
+        let home = std::env::temp_dir().join(format!(
+            "molt-appscan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let app = home.join("Applications").join("Probe.app");
+        std::fs::create_dir_all(app.join("Contents").join("MacOS")).unwrap();
+        // 1 个 400 KiB 的文件：APFS 上一定占出可观的块数，不会被读成 0
+        std::fs::write(
+            app.join("Contents").join("MacOS").join("probe"),
+            vec![3u8; 400 * 1024],
+        )
+        .unwrap();
+
+        let mut job = AppScanJob::start(home.to_string_lossy().to_string());
+        // 等到 Done（正常几秒内结束；这里给足余量，但仍要有上限，不然卡住会挂死测试）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let mut done = None;
+        let mut per_item: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        while std::time::Instant::now() < deadline {
+            for p in job.drain() {
+                match p {
+                    AppScanProgress::Measured { path, bytes } => {
+                        per_item.insert(path, bytes);
+                    }
+                    AppScanProgress::Done(res) => done = Some(res),
+                    AppScanProgress::Listed { .. } => {}
+                }
+            }
+            if let Some(d) = done.clone() {
+                done = Some(d);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let result = done.expect("应用列举要在时限内结束");
+
+        let probe = result
+            .apps
+            .iter()
+            .find(|a| a.name == "Probe")
+            .expect("假 home 里的 Probe.app 要被列出来");
+        assert!(
+            probe.bytes >= 400 * 1024,
+            "终局体积要带回真实值，实际 {} —— 为 0 说明量到的结果没写回 apps，\
+             界面会永远停在「正在量…」",
+            probe.bytes
+        );
+        let key = probe.path.display().to_string();
+        assert_eq!(
+            per_item.get(&key),
+            Some(&probe.bytes),
+            "逐条消息与终局必须是同一个数"
+        );
+
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -435,5 +906,42 @@ mod tests {
         job.poll();
         assert!(job.is_finished(), "最后一条是 Done，应算结束");
         assert!(job.result().is_some());
+    }
+
+    #[test]
+    fn scan_cache_round_trips_and_marks_itself_as_stale() {
+        let d = std::env::temp_dir().join(format!("molt-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("scan-cache.json");
+
+        let mut r = ScanResult::default();
+        r.items.push(
+            molt_core::Candidate::new(
+                "/Users/me/a/target",
+                molt_core::ItemKind::Dir,
+                molt_core::Verdict::Reclaimable,
+            )
+            .with_size(100, 80, 3),
+        );
+        r.rule_ids.push("rust-target".into());
+        r.save_cache(&p);
+
+        let (back, at) = ScanResult::load_cache(&p, std::time::Duration::from_secs(3600))
+            .expect("刚写的缓存应当能读回来");
+        assert_eq!(back.items.len(), 1);
+        assert_eq!(back.items[0].path.to_string_lossy(), "/Users/me/a/target");
+        assert_eq!(back.rule_ids, vec!["rust-target".to_string()]);
+        // 读回来的必须自报「这是缓存」：界面靠它决定不预勾任何项。
+        assert!(back.from_cache, "缓存结果必须标明来源");
+        // 时刻也要带回来，且是个 HH:MM 形状
+        assert_eq!(at.len(), 5, "时刻应当是 HH:MM，实际 {at:?}");
+        assert!(at.contains(':'), "时刻应当是 HH:MM，实际 {at:?}");
+
+        // 过期的缓存不再返回 —— 一天的旧数字不能当成现在的磁盘
+        assert!(
+            ScanResult::load_cache(&p, std::time::Duration::ZERO).is_none(),
+            "过期缓存要丢掉"
+        );
+        std::fs::remove_dir_all(&d).ok();
     }
 }

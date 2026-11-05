@@ -5,8 +5,11 @@
 //!
 //! 设计取向（对着 docs/research.md 的结论）：目标用户里有一半不懂电脑，
 //! 他们判断一个清理工具是否可信，靠的是「配色克制、文字清楚、主按钮只有一个」。
-//! 所以整套界面只有一种强调色（墨绿，代表「安全、可以做」），
+//! 所以整套界面只有一种强调色（蓝，代表「干净、可以做」），
 //! 红色只留给不可撤销的操作，受保护项一律用中性灰。
+//!
+//! 底色与中性色都带一点冷调（不是纯灰），和强调色同族：界面因此读起来是
+//! 一整块蓝调而不是「蓝按钮贴在灰纸上」——这正是「以蓝色为基调」的意思。
 //!
 //! egui 0.37 起，浅色与深色各持一份 `Style`。所以这里的做法是：
 //! 两套样式都装上一遍，之后由 egui 根据系统外观自己挑。
@@ -24,6 +27,16 @@ pub enum Mode {
 pub struct Palette {
     /// 窗口背景
     pub bg: egui::Color32,
+    /// 侧栏背景：比窗口底深半档的同族灰蓝。
+    ///
+    /// 侧栏不能用 `surface`（白卡色）——一条白色竖带贴在白内容区旁，
+    /// 侧栏与内容的边界就消失了；也不能用 `surface_alt` 那样的凹槽色，
+    /// 它读起来像「被按下去」。macOS 侧栏的观感是「比内容区略深的同一块底」。
+    pub sidebar_bg: egui::Color32,
+    /// 行与行之间的细分隔线：比 `border` 再淡一档。
+    /// 清单改用访达式行列表后，行间靠这条 1 像素的线而不是卡片描边分彼此——
+    /// 用 `border` 画几十条会整页发灰。
+    pub row_separator: egui::Color32,
     /// 卡片 / 分组的背景
     pub surface: egui::Color32,
     /// 更弱一层的背景（表头、输入框、分段控件底槽）
@@ -52,7 +65,7 @@ pub struct Palette {
     pub protected: egui::Color32,
     /// 磁盘饼图里「已用、但清不掉」那一段。
     ///
-    /// 它既不是「能清」（绿）也不是「你的记录」（浅灰），必须是第三档中性色，
+    /// 它既不是「能清」（蓝）也不是「你的记录」（浅灰），必须是第三档中性色，
     /// 否则饼图会被读成「一大块都是能清的」或「一大块都是我的文件」。
     pub used_bar: egui::Color32,
     /// 危险 / 失败 / 空间告急。只在「必须马上看」的地方用，
@@ -76,46 +89,50 @@ pub const RADIUS_PILL: u8 = 6;
 impl Palette {
     pub fn light() -> Self {
         Self {
-            bg: egui::Color32::from_rgb(246, 247, 246),
+            bg: egui::Color32::from_rgb(244, 247, 252),
+            sidebar_bg: egui::Color32::from_rgb(233, 239, 247),
+            row_separator: egui::Color32::from_rgb(212, 221, 234),
             surface: egui::Color32::from_rgb(255, 255, 255),
-            surface_alt: egui::Color32::from_rgb(241, 243, 242),
-            surface_hover: egui::Color32::from_rgb(246, 248, 247),
-            text: egui::Color32::from_rgb(23, 26, 25),
-            text_dim: egui::Color32::from_rgb(101, 110, 106),
-            text_faint: egui::Color32::from_rgb(146, 154, 150),
-            border: egui::Color32::from_rgb(226, 230, 228),
-            border_strong: egui::Color32::from_rgb(205, 211, 208),
-            reclaimable: egui::Color32::from_rgb(13, 104, 88),
-            accent_soft: egui::Color32::from_rgb(231, 242, 238),
-            costly: egui::Color32::from_rgb(151, 88, 13),
-            costly_soft: egui::Color32::from_rgb(249, 242, 231),
-            protected: egui::Color32::from_rgb(136, 143, 139),
-            used_bar: egui::Color32::from_rgb(95, 107, 102),
-            danger: egui::Color32::from_rgb(177, 52, 43),
-            danger_soft: egui::Color32::from_rgb(250, 238, 236),
+            surface_alt: egui::Color32::from_rgb(236, 242, 250),
+            surface_hover: egui::Color32::from_rgb(242, 246, 252),
+            text: egui::Color32::from_rgb(18, 27, 40),
+            text_dim: egui::Color32::from_rgb(92, 106, 128),
+            text_faint: egui::Color32::from_rgb(140, 153, 173),
+            border: egui::Color32::from_rgb(219, 228, 241),
+            border_strong: egui::Color32::from_rgb(194, 208, 227),
+            reclaimable: egui::Color32::from_rgb(21, 101, 216),
+            accent_soft: egui::Color32::from_rgb(228, 238, 253),
+            costly: egui::Color32::from_rgb(158, 92, 16),
+            costly_soft: egui::Color32::from_rgb(250, 241, 228),
+            protected: egui::Color32::from_rgb(139, 146, 152),
+            used_bar: egui::Color32::from_rgb(126, 143, 168),
+            danger: egui::Color32::from_rgb(179, 54, 46),
+            danger_soft: egui::Color32::from_rgb(251, 236, 234),
             scale: 1.0,
         }
     }
 
     pub fn dark() -> Self {
         Self {
-            bg: egui::Color32::from_rgb(19, 21, 21),
-            surface: egui::Color32::from_rgb(28, 31, 30),
-            surface_alt: egui::Color32::from_rgb(37, 41, 40),
-            surface_hover: egui::Color32::from_rgb(34, 38, 37),
-            text: egui::Color32::from_rgb(240, 243, 241),
-            text_dim: egui::Color32::from_rgb(154, 163, 159),
-            text_faint: egui::Color32::from_rgb(117, 126, 122),
-            border: egui::Color32::from_rgb(45, 50, 49),
-            border_strong: egui::Color32::from_rgb(62, 68, 66),
-            reclaimable: egui::Color32::from_rgb(90, 199, 171),
-            accent_soft: egui::Color32::from_rgb(29, 48, 43),
-            costly: egui::Color32::from_rgb(222, 163, 92),
-            costly_soft: egui::Color32::from_rgb(46, 38, 26),
-            protected: egui::Color32::from_rgb(139, 147, 143),
-            used_bar: egui::Color32::from_rgb(124, 138, 133),
-            danger: egui::Color32::from_rgb(232, 123, 112),
-            danger_soft: egui::Color32::from_rgb(48, 30, 28),
+            bg: egui::Color32::from_rgb(13, 19, 28),
+            sidebar_bg: egui::Color32::from_rgb(18, 26, 38),
+            row_separator: egui::Color32::from_rgb(40, 53, 70),
+            surface: egui::Color32::from_rgb(22, 30, 42),
+            surface_alt: egui::Color32::from_rgb(30, 41, 56),
+            surface_hover: egui::Color32::from_rgb(26, 36, 48),
+            text: egui::Color32::from_rgb(234, 241, 250),
+            text_dim: egui::Color32::from_rgb(154, 168, 190),
+            text_faint: egui::Color32::from_rgb(116, 132, 155),
+            border: egui::Color32::from_rgb(37, 49, 65),
+            border_strong: egui::Color32::from_rgb(54, 69, 90),
+            reclaimable: egui::Color32::from_rgb(101, 163, 255),
+            accent_soft: egui::Color32::from_rgb(23, 41, 66),
+            costly: egui::Color32::from_rgb(224, 168, 100),
+            costly_soft: egui::Color32::from_rgb(45, 36, 23),
+            protected: egui::Color32::from_rgb(140, 148, 156),
+            used_bar: egui::Color32::from_rgb(110, 128, 153),
+            danger: egui::Color32::from_rgb(240, 124, 114),
+            danger_soft: egui::Color32::from_rgb(49, 30, 28),
             scale: 1.0,
         }
     }
@@ -143,7 +160,7 @@ impl Palette {
 
     /// 铺在强调色上的文字色。
     ///
-    /// 浅色模式强调色是深墨绿，配白字；深色模式强调色是浅青绿，配深字。
+    /// 浅色模式强调色是饱和蓝，配近白字；深色模式强调色是浅蓝，配深字。
     /// 两处都由 `bg` 天然满足（它正好是强调色的反衬），所以直接复用它，
     /// 不再引入一个容易写反的新字段。
     pub fn on_accent(&self) -> egui::Color32 {
@@ -305,6 +322,8 @@ fn current_mode(ctx: &egui::Context) -> Mode {
     }
 }
 
+use crate::icons;
+
 /// 把系统中文字体装进 egui。
 ///
 /// 装两处：`Proportional`（正文）和 `Monospace`（等宽）。
@@ -328,6 +347,17 @@ pub fn install_fonts(ctx: &egui::Context) {
         // 放在末尾：拉丁字符优先用 egui 自带字体（字重更匀），汉字回落到系统字体。
         list.push(KEY.to_owned());
     }
+
+    // 图标字体单独一个家族，**不**混进正文：按字符码在正文里回落到图标字体，
+    // 会把正文里万一出现的私用区字符画成图标，那是很难查的意外。只给
+    // [`crate::icons`] 用，它拿到的每个字符都确定是图标。
+    fonts.font_data.insert(
+        icons::FONT_KEY.to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(icons::FONT_BYTES)),
+    );
+    fonts
+        .families
+        .insert(icons::family(), vec![icons::FONT_KEY.to_owned()]);
 
     ctx.set_fonts(fonts);
 }
@@ -359,9 +389,11 @@ mod tests {
 
     #[test]
     fn reclaimable_and_costly_are_semantically_opposed() {
-        // 可回收偏绿（g 最大），有代价偏暖（r 最大）——一眼可分
+        // 可回收偏冷（蓝）、有代价偏暖（r 最大）——冷暖对立，一眼可分。
+        // 不再用「绿 vs 红」那一对：界面整体是蓝调，绿色强调会在蓝底上
+        // 变成第二个完全不同的色系，而蓝与暖橙在同一套冷色底上仍然分明。
         for p in [Palette::light(), Palette::dark()] {
-            assert!(p.reclaimable.g() > p.reclaimable.r());
+            assert!(p.reclaimable.b() > p.reclaimable.r());
             assert!(p.costly.r() > p.costly.g());
         }
     }

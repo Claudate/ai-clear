@@ -30,3 +30,5 @@ eframe = { version = "0.37", default-features = false, features = [
 ] }
 egui = "0.37"
 png = "0.18"
+plist = "1.10.3"
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }

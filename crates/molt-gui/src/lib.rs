@@ -4,9 +4,15 @@
 //! 能用同一份界面代码在无屏幕录制权限时出图——验证的画面和用户看到的
 //! 必须是同一份实现，否则验了也不作数。
 
+pub mod action;
 pub mod ai_worker;
 pub mod app;
+pub mod appicon;
+pub mod brand;
+pub mod components;
 pub mod fonts;
+pub mod icons;
+pub mod imagedecode;
 pub mod pages;
 pub mod paths;
 pub mod schedule;

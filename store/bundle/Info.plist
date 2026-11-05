@@ -21,9 +21,9 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>蜕</string>
+    <string>净灵</string>
     <key>CFBundleDisplayName</key>
-    <string>蜕 · Molt</string>
+    <string>净灵 · Cleanling</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -47,11 +47,11 @@
       完全磁盘访问没有专门的用途键，权限本身由用户在系统设置里授予。
     -->
     <key>NSDocumentsFolderUsageDescription</key>
-    <string>收需要读取项目目录里的构建产物（如 target、node_modules）来计算可以回收多少空间。只读，不会修改文件。</string>
+    <string>净灵需要读取项目目录里的构建产物（如 target、node_modules）来计算可以回收多少空间。只读，不会修改文件。</string>
     <key>NSDownloadsFolderUsageDescription</key>
-    <string>收需要读取下载目录里的缓存文件来计算可以回收多少空间。只读，不会修改文件。</string>
+    <string>净灵需要读取下载目录里的缓存文件来计算可以回收多少空间。只读，不会修改文件。</string>
     <key>NSDesktopFolderUsageDescription</key>
-    <string>收需要读取桌面上的项目目录来计算可以回收多少空间。只读，不会修改文件。</string>
+    <string>净灵需要读取桌面上的项目目录来计算可以回收多少空间。只读，不会修改文件。</string>
 
     <!-- 程序不含 PyObjC 之类的脚本桥，显式关闭以缩小攻击面。 -->
     <key>NSAppleScriptEnabled</key>

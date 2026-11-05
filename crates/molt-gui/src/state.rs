@@ -22,10 +22,14 @@ pub enum Page {
     Workbench,
     /// 隔离区：固定入口，查看 / 还原 / 彻底删除
     Quarantine,
+    /// 卸载：列出已装应用与它们的残留
+    Uninstall,
     /// 历史：发生过什么，只读
     History,
     /// 自动化：定时清理
     Automation,
+    /// 工具：随手用的功能（新建、临时空间、重扫），自成一个页面
+    Tools,
     /// 设置：AI 配置（含 jev）与规则信息
     Settings,
 }
@@ -35,8 +39,10 @@ impl Page {
         match self {
             Page::Workbench => "清理",
             Page::Quarantine => "临时空间",
+            Page::Uninstall => "卸载",
             Page::History => "历史",
             Page::Automation => "自动清理",
+            Page::Tools => "工具",
             Page::Settings => "设置",
         }
     }
@@ -47,18 +53,34 @@ impl Page {
         match self {
             Page::Workbench => NavIcon::Gauge,
             Page::Quarantine => NavIcon::Archive,
+            Page::Uninstall => NavIcon::Box,
             Page::History => NavIcon::Clock,
             Page::Automation => NavIcon::Calendar,
+            Page::Tools => NavIcon::Wrench,
             Page::Settings => NavIcon::Gear,
         }
     }
 
-    pub const ALL: [Page; 5] = [
+    pub const ALL: [Page; 7] = [
         Page::Workbench,
         Page::Quarantine,
+        Page::Uninstall,
         Page::History,
         Page::Automation,
+        Page::Tools,
         Page::Settings,
+    ];
+
+    /// 顶栏图标的编排：组内相邻，组间一道竖线隔开。
+    ///
+    /// 七个图标等距排成一条时，用户得把每个都扫一遍才知道哪个在哪；
+    /// 分成「清理 / 应用与记录 / 设置」三段之后，先定位到组、再在组里找，
+    /// 是两步而不是七步。组内顺序仍是 `ALL` 的顺序，所以「从左到右读一遍」
+    /// 与 `ALL` 一致，不必记两套。
+    pub const NAV_GROUPS: [&'static [Page]; 3] = [
+        &[Page::Workbench, Page::Quarantine],
+        &[Page::Uninstall, Page::History],
+        &[Page::Automation, Page::Tools, Page::Settings],
     ];
 }
 
@@ -77,11 +99,15 @@ pub enum Activity {
     Schedule,
     /// 正在还原
     Restoring,
+    /// 正在列出已装应用与残留
+    Listing,
 }
 
 impl Activity {
     pub fn is_busy(self) -> bool {
-        !matches!(self, Activity::Idle)
+        // 「列出应用」是只读的后台任务，不占任何写路径，也不该把按钮全都置灰：
+        // 用户完全可以在它跑的同时去清理或还原。它只用来在顶栏显示进展。
+        !matches!(self, Activity::Idle | Activity::Listing)
     }
 
     /// 顶栏那一行「现在在干什么」。空闲时没有可说的。
@@ -94,6 +120,7 @@ impl Activity {
             Activity::Purging => Some("正在彻底删除"),
             Activity::Schedule => Some("正在执行定时清理"),
             Activity::Restoring => Some("正在还原"),
+            Activity::Listing => Some("正在列出应用"),
         }
     }
 
@@ -107,6 +134,8 @@ impl Activity {
             Activity::Purging => "彻底删除进行中，完成后再操作",
             Activity::Schedule => "定时清理正在执行，完成后再操作",
             Activity::Restoring => "正在还原，完成后再操作",
+            // 列应用是只读的，不该堵住别的操作
+            Activity::Listing => "",
         }
     }
 }
@@ -117,6 +146,8 @@ pub enum Filter {
     All,
     /// 「现在就能清」：建议清理 + 可回收。首页只露这一档时最常用的一种看法。
     Cleanable,
+    /// 最近 30 天没动过：把「建议清理」这一档单独露出来。
+    Recent,
     /// 建议优先处理：有代价但久未使用，或 AI 判定可以动
     Suggested,
     Reclaimable,
@@ -231,16 +262,178 @@ impl PendingClean {
     }
 }
 
+/// 隔离区里一条待彻底删除的记录。
+///
+/// 存的是**编号**，不是只存展示路径：确认框弹出之后用户还能改勾选，
+/// 而执行必须按按下确认那一刻的那一批。按路径重读当前勾选会偷换批次——
+/// 用户确认的是 A，执行的却可能是 A+B。
+#[derive(Debug, Clone)]
+pub struct PendingPurgeItem {
+    pub id: i64,
+    pub original: PathBuf,
+    pub bytes: u64,
+}
+
 /// 一次待确认的隔离区彻底删除。
 #[derive(Debug, Clone)]
 pub struct PendingPurge {
-    pub items: Vec<PendingItem>,
+    pub items: Vec<PendingPurgeItem>,
     pub bytes: u64,
 }
 
 impl PendingPurge {
     pub fn count(&self) -> usize {
         self.items.len()
+    }
+
+    /// 要删除的记录编号。执行只认这些，不再回头看当前勾选。
+    pub fn ids(&self) -> Vec<i64> {
+        self.items.iter().map(|i| i.id).collect()
+    }
+}
+
+/// 卸载页要展示的一个应用。
+///
+/// 与 `molt_act::AppEntry` 分开一份，是因为界面需要「这个应用被勾了哪几项」
+/// 这类纯展示状态；写盘层只认路径。
+#[derive(Debug, Clone)]
+pub struct AppRow {
+    pub name: String,
+    /// 缩成 `~/...` 或原样的本体路径
+    pub path: String,
+    pub bundle_id: Option<String>,
+    pub bytes: u64,
+    /// 体积是否已经量过。
+    ///
+    /// 只用 `bytes == 0` 判断「还没量」会把**真的很小或量不出来**的应用也画成
+    /// 「正在量…」——那样一个永远量不完的应用就让格子永久停在加载态。
+    /// 分开之后：没量过写「正在量…」，量过而结果是 0 就老老实实写 0 B。
+    pub bytes_known: bool,
+    pub leftovers: Vec<LeftoverRow>,
+    /// 残留总和，列表里直接用
+    pub leftover_bytes: u64,
+    /// `CFBundleIconFile`。取图标时用它定位 `.icns`，缺了就去资源目录里找。
+    pub icon_file: Option<String>,
+    /// 残留是否已经找过。
+    ///
+    /// 清单出来时是 `false`——残留不再跟着列应用一起扫（个别应用能扫上十分钟）。
+    /// 用户点开它时才去扫，扫之前界面显示「正在找残留…」，扫完才谈得上勾选。
+    /// `false` 与「找到了 0 条」必须能分开：前者是不确定，后者是确定没有。
+    pub leftovers_loaded: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct LeftoverRow {
+    pub path: String,
+    pub display: String,
+    pub category: &'static str,
+    pub bytes: u64,
+    /// 落在 `/Library` 下、要管理员权限。界面上照常列出并标注，
+    /// 不能因为删不掉就当它不存在——用户刚按的是「卸载干净」。
+    pub needs_admin: bool,
+    /// 体积没量完（目录读不动）。此时 `bytes` 只是下界，界面要如实说明，
+    /// 不能把半截数字当成完整大小。
+    pub unmeasured: bool,
+}
+
+/// 卸载页的全部状态。
+#[derive(Debug, Default)]
+pub struct UninstallPanel {
+    pub apps: Vec<AppRow>,
+    /// 这份清单是什么时候列出来的。`None` 表示还没列过。
+    ///
+    /// 切回这一页不该重新遍历一遍 `/Applications`、更不该把每个 bundle 的体积
+    /// 再量一次——那是几秒钟的等待，而用户只是从别的页签点回来。
+    /// 保留时间戳是为了在标题上如实写「多久之前读的」，让「重新扫描」有依据。
+    pub listed_at: Option<std::time::SystemTime>,
+    pub error: Option<String>,
+    pub loading: bool,
+    /// 悬浮窗里正在看的那个应用（按本体路径识别）。`None` 表示没有浮窗。
+    pub open: Option<String>,
+    /// 需要用户看清楚的说明（比如「这个应用在运行，先退出」）
+    pub note: Option<String>,
+    /// 扫描过的目录，界面上写清楚「我没看哪里」
+    pub scanned_dirs: Vec<String>,
+    /// 正在为哪个应用找残留（本体路径）。页面据此显示「正在找残留…」。
+    pub leftovers_loading: Option<String>,
+    /// 右键点了「卸载」但残留还没扫过：等这一轮扫完再弹确认框。
+    ///
+    /// 不留这个标记就只能拿「此刻已知的残留」凑批次——而此刻很可能一条都还不知道，
+    /// 结果就是「卸载干净」只卸掉了 `.app` 本体。
+    pub pending_uninstall_after_scan: Option<String>,
+    /// 已经发起卸载、正在离开磁盘的那个应用（本体路径）。
+    ///
+    /// 卸载是后台线程跑的，界面只能靠事实判断成败：本体从磁盘上消失了才算成功。
+    pub removing: Option<String>,
+}
+
+impl UninstallPanel {
+    /// 垃圾桶、系统目录这些永远不列——列出来又标成不可选，只是给用户看废行。
+    pub fn is_open(&self, path: &str) -> bool {
+        self.open.as_deref() == Some(path)
+    }
+
+    /// 当前展开的那个应用。
+    pub fn current(&self) -> Option<&AppRow> {
+        let key = self.open.as_deref()?;
+        self.apps.iter().find(|a| a.path == key)
+    }
+
+    /// 悬浮窗里要列的文件条数（本体 + 残留）。
+    pub fn file_count(&self) -> usize {
+        self.current().map(|a| 1 + a.leftovers.len()).unwrap_or(0)
+    }
+
+    /// 这个应用全部加起来的体积。
+    pub fn total_bytes(&self) -> u64 {
+        self.current()
+            .map(|a| a.bytes + a.leftover_bytes)
+            .unwrap_or(0)
+    }
+}
+
+/// 新建窗口的状态。
+///
+/// 这里存的是**输入**，不是结果：预览由 `molt_act::CreatePlan::preflight`
+/// 现算，不缓存——缓存会让「输入改了、数字没变」这种假象出现。
+#[derive(Debug, Clone, Default)]
+pub struct CreatePanel {
+    pub open: bool,
+    /// 建在哪里
+    pub root: String,
+    /// 要建的东西，一行一条
+    pub lines: String,
+    pub tab: CreateTab,
+    /// 上一次创建的结果，用来显示「撤销」按钮
+    pub last: Option<molt_act::CreateReport>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CreateTab {
+    #[default]
+    Skeleton,
+    Dirs,
+    Files,
+}
+
+impl CreateTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            CreateTab::Skeleton => "项目骨架",
+            CreateTab::Dirs => "文件夹",
+            CreateTab::Files => "文件",
+        }
+    }
+
+    pub const ALL: [CreateTab; 3] = [CreateTab::Skeleton, CreateTab::Dirs, CreateTab::Files];
+}
+
+impl CreatePanel {
+    /// 当前输入对应的预检结果。纯只读，每帧现算都够快（最多 500 行）。
+    pub fn plan(&self, home: &str) -> molt_act::CreatePlan {
+        let specs = molt_act::create::parse_lines(&self.lines);
+        molt_act::CreatePlan::preflight(std::path::Path::new(&self.root), &specs, home)
     }
 }
 
@@ -389,12 +582,28 @@ pub struct AppState {
     pub job: Option<ScanJob>,
     pub clean_job: Option<crate::worker::CleanJob>,
     pub purge_job: Option<crate::worker::PurgeJob>,
+    /// 批量还原的后台任务。它的存在本身就是「正在还原」：
+    /// 界面据此置灰勾选与动作，而不是靠一个同步循环把窗口卡住。
+    pub restore_job: Option<crate::worker::RestoreJob>,
+    /// 枚举已装应用的后台任务
+    pub app_scan_job: Option<crate::worker::AppScanJob>,
+    /// 正在盘点某个应用的残留（点开它时才启动）
+    pub leftover_job: Option<crate::worker::LeftoverJob>,
     pub schedule_job: Option<crate::schedule::ScheduleJob>,
     pub result: Option<Arc<ScanResult>>,
+    /// 当前这份结果是本次运行真的扫出来的，而不是启动时读的缓存。
+    ///
+    /// 用来决定页面上那句「上次扫描」怎么写：缓存结果必须让用户知道
+    /// 它是旧的，否则一个过时的数字会直接变成一次删除决定。
+    pub scanned_now: bool,
     /// 已勾选的路径。只有可动项会进来。
     pub checked: HashSet<String>,
     pub filter: Filter,
     pub query: String,
+    /// 搜索框的**草稿**。`TextEdit` 需要一个 `&mut String`，而视图现在只拿到
+    /// `&AppState`——两者冲突。所以输入先进这里，失焦或回车时再作为
+    /// `Action::SetQuery` 提交。它和 `query` 的差别只在「还没提交」这一瞬间。
+    pub query_draft: String,
     pub quarantine: Vec<QuarantineRow>,
     pub quarantine_error: Option<String>,
     pub quarantine_loading: bool,
@@ -421,11 +630,13 @@ pub struct AppState {
     pub last_op: Option<Arc<OpReport>>,
     pub pending_clean: Option<PendingClean>,
     pub pending_purge: Option<PendingPurge>,
-    /// 清单是否已展开到全部。首页默认只露前几项，
-    /// 否则一屏全被清单吃掉，结论区和主按钮就被挤到看不见。
-    pub list_expanded: bool,
-    /// 下一帧是否把滚动条移到清单开头（用户点了「看看清单」）
+    /// 下一帧是否把滚动条移到清单开头（用户切了筛选或搜索）
     pub scroll_to_list: bool,
+    /// 详情抽屉里正在看的那一项（扫描结果里的路径）。`None` 表示抽屉关着。
+    ///
+    /// 抽屉是只读的简介面板（访达「显示简介」那一类）：它只把一行放不下的
+    /// 信息摆出来，勾选与清理动作仍留在清单与底栏上。
+    pub detail_path: Option<String>,
     /// 定时任务页的状态
     pub auto: AutoPanel,
     /// 首页圆环在清理中的动画进度（0..1）。清理结束时不再推进，
@@ -434,7 +645,7 @@ pub struct AppState {
     /// 本次清理的总项数与总字节，用于圆环圆心与说明文字。
     pub clean_total_items: usize,
     pub clean_total_bytes: u64,
-    /// 刚清完的庆祝态剩余秒数：>0 时圆环满绿并写「清理完成」，
+    /// 刚清完的庆祝态剩余秒数：>0 时圆环满蓝并写「清理完成」，
     /// 倒数完毕就回到磁盘读数。它让「清掉了」这件事自己看得见。
     pub clean_done_secs: f32,
     /// 上一帧是否在清理。用来区分「清理被中断」与「动画只是被别人摆好了」：
@@ -444,6 +655,10 @@ pub struct AppState {
     /// 两者在环心不能写同一句话：放进临时空间并没有释放空间，
     /// 写「已腾出」就是在骗人。
     pub clean_was_delete: bool,
+    /// 卸载页
+    pub uninstall: UninstallPanel,
+    /// 新建文件夹/文件窗口
+    pub create: CreatePanel,
 }
 
 /// 自动化页的状态。
@@ -522,11 +737,16 @@ impl AppState {
             job: None,
             clean_job: None,
             purge_job: None,
+            restore_job: None,
+            app_scan_job: None,
+            leftover_job: None,
             schedule_job: None,
             result: None,
+            scanned_now: false,
             checked: HashSet::new(),
             filter: Filter::All,
             query: String::new(),
+            query_draft: String::new(),
             quarantine: Vec::new(),
             quarantine_error: None,
             // 标成 true：窗口一打开就会读一次，读到之前不显示「隔离区是空的」
@@ -548,8 +768,8 @@ impl AppState {
             last_op: None,
             pending_clean: None,
             pending_purge: None,
-            list_expanded: false,
             scroll_to_list: false,
+            detail_path: None,
             auto: AutoPanel::default(),
             clean_anim: 0.0,
             clean_total_items: 0,
@@ -557,6 +777,8 @@ impl AppState {
             clean_done_secs: 0.0,
             clean_was_running: false,
             clean_was_delete: false,
+            uninstall: UninstallPanel::default(),
+            create: CreatePanel::default(),
         }
     }
 
@@ -566,6 +788,14 @@ impl AppState {
 
     pub fn is_cleaning(&self) -> bool {
         self.clean_job
+            .as_ref()
+            .map(|j| !j.is_finished())
+            .unwrap_or(false)
+    }
+
+    /// 是否正在后台枚举应用列表。只读任务，不参与互斥。
+    pub fn is_listing(&self) -> bool {
+        self.app_scan_job
             .as_ref()
             .map(|j| !j.is_finished())
             .unwrap_or(false)
@@ -601,8 +831,10 @@ impl AppState {
             Activity::Purging
         } else if self.is_scheduled() {
             Activity::Schedule
-        } else if self.restoring.is_some() {
+        } else if self.restoring.is_some() || self.restore_job.is_some() {
             Activity::Restoring
+        } else if self.is_listing() {
+            Activity::Listing
         } else {
             Activity::Idle
         }
@@ -745,7 +977,17 @@ impl AppState {
     /// 这两档合起来才是「打开就能动」的那批：前者是久未使用、后者是自动重建。
     /// 有代价项一律不默认勾选——那是用户要自己决定的区域。
     pub fn apply_result(&mut self, result: Arc<ScanResult>) {
+        // 缓存结果只用来铺一屏，**不预勾任何项**：那些路径可能已经不存在、
+        // 也可能体积变了，而默认勾选直接连着「放入临时空间」。等这次真扫完
+        // （`from_cache` 为 false）再按默认策略勾。
+        let from_cache = result.from_cache;
         self.result = Some(result);
+        self.scanned_now = !from_cache;
+        if from_cache {
+            self.checked.clear();
+            self.pending_clean = None;
+            return;
+        }
         let keep: Vec<String> = self
             .result
             .as_ref()
@@ -888,14 +1130,14 @@ impl AppState {
     }
 
     pub fn pending_purge_from_checked(&self) -> Option<PendingPurge> {
-        let items: Vec<PendingItem> = self
+        let items: Vec<PendingPurgeItem> = self
             .quarantine
             .iter()
             .filter(|r| r.restorable && self.quarantine_checked.contains(&r.id))
-            .map(|r| PendingItem {
-                path: PathBuf::from(&r.original),
+            .map(|r| PendingPurgeItem {
+                id: r.id,
+                original: PathBuf::from(&r.original),
                 bytes: r.bytes,
-                note: None,
             })
             .collect();
         if items.is_empty() {
@@ -925,6 +1167,7 @@ impl AppState {
                     Filter::Cleanable => {
                         matches!(pr, Priority::Suggested | Priority::Safe)
                     }
+                    Filter::Recent => pr == Priority::Suggested,
                     Filter::Suggested => pr == Priority::Suggested,
                     Filter::Reclaimable => pr == Priority::Safe,
                     Filter::Costly => pr == Priority::Costly,
@@ -1029,6 +1272,7 @@ mod tests {
             rule_ids: Vec::new(),
             denied_roots: vec![],
             elapsed_secs: 0.0,
+            from_cache: false,
         };
         s.apply_result(Arc::new(result));
         s

@@ -37,6 +37,13 @@ pub struct WalkOptions {
     pub skip: Vec<PathBuf>,
     /// 是否跟随符号链接。默认 false——跟随就等于把清理范围扩到了链接目标
     pub follow_symlinks: bool,
+    /// 这次遍历最多花多久。`None` 不限时。
+    ///
+    /// 为什么需要：有几个目录（实测是 `~/Library/Group Containers` 下的
+    /// 某些厂商容器）会让 `read_dir` 一直不返回，遍历既读不完也不报错。
+    /// 没有上限时，界面就永久停在「正在量…」，用户只能强退。
+    /// 超时不是错误，是「这一块量不出来」，必须能和「0 字节」分开。
+    pub budget: Option<std::time::Duration>,
 }
 
 /// 遍历结果。`denied` 记录因权限不足跳过的条目数——
@@ -45,13 +52,16 @@ pub struct WalkOptions {
 pub struct WalkResult {
     pub measured: Measured,
     pub denied: u64,
+    /// 到时间上限就收手了。此时 `measured` 是**下界**，不是准确值。
+    pub truncated: bool,
 }
 
 /// 量一个路径（文件或目录）的体积。
 pub fn measure(path: &Path, opts: &WalkOptions) -> WalkResult {
     let mut seen: HashSet<(u64, u64)> = HashSet::new();
     let mut result = WalkResult::default();
-    walk(path, opts, 0, &mut seen, &mut result);
+    let started = std::time::Instant::now();
+    walk(path, opts, 0, &mut seen, &mut result, started);
     result
 }
 
@@ -110,7 +120,17 @@ fn walk(
     depth: usize,
     seen: &mut HashSet<(u64, u64)>,
     out: &mut WalkResult,
+    started: std::time::Instant,
 ) {
+    if out.truncated {
+        return;
+    }
+    if let Some(b) = opts.budget {
+        if started.elapsed() > b {
+            out.truncated = true;
+            return;
+        }
+    }
     if opts.skip.iter().any(|s| path.starts_with(s)) {
         return;
     }
@@ -166,7 +186,7 @@ fn walk(
                 }
             }
         }
-        walk(&child, opts, depth + 1, seen, out);
+        walk(&child, opts, depth + 1, seen, out, started);
     }
 }
 
@@ -349,6 +369,32 @@ mod tests {
         };
         let r = measure(&d, &opts);
         assert_eq!(r.measured.files, 0);
+
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn budget_stops_a_walk_that_would_run_long() {
+        // 造一棵够大的树，把预算压到 0：遍历必须在进入第一层就被挡住，
+        // 而不是把整棵树走完。这条钉的是「有上限」这件事本身，
+        // 真机上那种 read_dir 卡死的目录由 `measure_with_budget` 的线程超时兜住。
+        let d = tmpdir("budget");
+        fs::create_dir_all(d.join("a/b/c")).unwrap();
+        fs::write(d.join("a/b/c/x.bin"), vec![0u8; 4096]).unwrap();
+
+        let opts = WalkOptions {
+            budget: Some(std::time::Duration::ZERO),
+            ..Default::default()
+        };
+        let r = measure(&d, &opts);
+        assert!(r.truncated, "预算为零时必须标明这次没量完");
+        assert_eq!(r.measured.files, 0, "超时后不该再往下读文件");
+
+        // 给足预算时同一棵树要能量完，且不被标成截断——
+        // 否则「truncated」就成了永远为真的废话。
+        let full = measure(&d, &WalkOptions::default());
+        assert!(!full.truncated);
+        assert_eq!(full.measured.files, 1);
 
         fs::remove_dir_all(&d).ok();
     }

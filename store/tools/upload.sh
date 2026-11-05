@@ -126,6 +126,9 @@ echo "日志：$LOG"
 
 if [[ $rc -ne 0 ]]; then
   echo "上传失败（退出码 $rc）。常见原因：" >&2
+  # Transporter 在 -v informational 下会把真实原因压掉：优先抓这两条，
+  # 它们分别对应「ASC 里还没建 App 记录」和它的上位症状。
+  grep -iE 'Could not find an application record|Client configuration failed' "$LOG" | tail -4 >&2
   grep -iE 'ERROR|Invalid|missing|not permitted|version' "$LOG" | tail -8 >&2
   exit $rc
 fi

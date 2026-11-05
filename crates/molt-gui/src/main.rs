@@ -28,10 +28,19 @@ fn main() -> eframe::Result<()> {
     }
 
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("净灵 · Cleanling")
-            .with_inner_size([1120.0, 800.0])
-            .with_min_inner_size([720.0, 520.0]),
+        viewport: {
+            let vp = eframe::egui::ViewportBuilder::default()
+                .with_title("净灵 · Cleanling")
+                .with_inner_size([1120.0, 800.0])
+                .with_min_inner_size([720.0, 520.0]);
+            // 窗口图标与顶栏用同一张图（crates/molt-gui/assets/icon.png）。
+            // 裸二进制运行时 Dock 显示的就是它；打成 .app 后由 Info.plist 的
+            // CFBundleIconFile 接管，两处保持同一个文件不会有一边忘了换。
+            match molt_gui::brand::window_icon() {
+                Some(icon) => vp.with_icon(icon),
+                None => vp,
+            }
+        },
         ..Default::default()
     };
 

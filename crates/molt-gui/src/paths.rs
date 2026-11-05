@@ -10,6 +10,15 @@ pub fn audit_db() -> std::path::PathBuf {
     molt_act::paths::audit_db()
 }
 
+/// 上一次扫描结果的落盘位置。
+///
+/// 一次全盘扫描在真机上要十几秒（扫的是几十万个文件的体积）。
+/// 窗口一打开就重扫一遍，用户每次都得对着「正在扫描…」等——而磁盘在
+/// 十几秒里几乎不会变。所以结果存一份，启动时先显示它，再在后台刷新。
+pub fn scan_cache() -> std::path::PathBuf {
+    molt_act::paths::app_dir().join("scan-cache.json")
+}
+
 pub fn quarantine_root() -> std::path::PathBuf {
     molt_act::paths::quarantine_root()
 }

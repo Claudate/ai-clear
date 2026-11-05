@@ -6,13 +6,17 @@
 
 pub mod archive;
 pub mod audit;
+pub mod create;
 pub mod hash;
 pub mod paths;
 pub mod permadelete;
 pub mod quarantine;
+pub mod uninstall;
 
 pub use audit::{ActionKind, ActionRecord, AuditStore, CleanSource, OpKind};
+pub use create::{CreateKind, CreatePlan, CreateReport, CreateSpec, SpecCheck};
 pub use quarantine::Quarantine;
+pub use uninstall::{AppEntry, AppMeta, Leftover, UninstallPlan};
 
 use molt_core::{Candidate, Verdict};
 use std::path::PathBuf;

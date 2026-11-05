@@ -48,6 +48,7 @@ fn apply(state: &mut AppState, items: Vec<Candidate>) {
         rule_ids: vec![],
         denied_roots: vec![],
         elapsed_secs: 1.0,
+        from_cache: false,
     }));
 }
 
@@ -228,7 +229,10 @@ fn both_clean_paths_run_for_real_in_a_fake_home() {
         .expect("应生成彻底删除批次");
     assert_eq!(pending.count(), 1);
     assert!(
-        pending.items[0].path.to_string_lossy().contains("Cursor"),
+        pending.items[0]
+            .original
+            .to_string_lossy()
+            .contains("Cursor"),
         "确认框要列出将被彻底删除的对象"
     );
     state.pending_purge = Some(pending);

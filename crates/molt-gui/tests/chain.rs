@@ -47,6 +47,7 @@ fn apply(state: &mut AppState, items: Vec<Candidate>) {
         rule_ids: vec![],
         denied_roots: vec![],
         elapsed_secs: 0.1,
+        from_cache: false,
     }));
 }
 
@@ -158,11 +159,17 @@ fn scan_ai_clean_schedule_feedback_chain() {
         Some(true)
     );
 
-    // ---- 2b. 首页那颗大按钮：走的就是默认勾选那批，不另算一批 ----
+    // ---- 2b. 底栏主按钮：走的就是默认勾选那批，不另算一批 ----
     // 方案要求验证「点按钮 → 确认框里的数量 == 建议清掉 + 可以清」。
-    // 直接调 hero_action，而不是在测试里重写一遍分支。
+    // 首页那颗大按钮已经删掉，现在这条链路从底栏的「清理这些（可还原）」进入，
+    // 也就是 `Action::PrepareClean(Quarantine)`——仍然走真实 apply，不绕过状态层。
     state.ai.safe.clear(); // 上一步 AI 把 target 挪进了「建议留着」，先还原
-    molt_gui::pages::workbench::hero_action(&mut state);
+    let acts = vec![molt_gui::action::Action::PrepareClean(
+        molt_act::CleanMode::Quarantine,
+    )];
+    for act in acts {
+        molt_gui::action::apply(&mut state, act);
+    }
     let pending = state
         .pending_clean
         .clone()
