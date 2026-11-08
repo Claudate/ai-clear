@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Policy · Cleanling</title>
+<meta name="description" content="Cleanling Privacy Policy: scanning and verdicts happen on your Mac; a scan summary is sent to a provider only when you configure one and actively use AI analysis.">
+<link rel="icon" type="image/png" href="/assets/logo.png">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body class="en">
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/en/"><img src="/assets/logo.png" alt="Cleanling icon">Cleanling</a>
+    <nav class="nav">
+      <a href="/en/">Home</a>
+      <a href="/support/en.html">Support</a>
+      <a href="/privacy/en.html" aria-current="page">Privacy</a>
+      <a href="/privacy/">简体中文</a>
+    </nav>
+  </div>
+</header>
+
+<section class="section">
+  <div class="prose">
+    <h1>Privacy Policy</h1>
+    <p class="updated">Cleanling · Last updated: November 8, 2026</p>
+
+    <p>Cleanling is a disk cleanup tool for macOS. This document explains what data it touches, where that data goes, and how to turn it off.</p>
+    <p><strong>In one sentence: scanning and verdicts happen entirely on your Mac and are never uploaded.</strong> A summary of the current scan is sent to a model provider only when you choose to use AI analysis and configure that provider yourself.</p>
+
+    <h2>1. Processed locally, never uploaded</h2>
+    <ul>
+      <li><strong>File paths and sizes.</strong> Scanning reads file system metadata (path, size, allocated size, file count, modification time) to build the list and the verdicts.</li>
+      <li><strong>Verdicts.</strong> Every item is classed as reclaimable, costly or protected by deterministic rules built into the binary. No network request is involved.</li>
+      <li><strong>Cleanup history.</strong> Which item was moved, restored or deleted, and when, is recorded in a local audit database (<code>~/Library/Application Support/app.molt/</code>).</li>
+      <li><strong>Quarantine contents.</strong> Moved files are kept as they are in a local quarantine folder and cleaned up according to your settings after seven days.</li>
+    </ul>
+    <p>None of this leaves your device. Cleanling has no accounts, no sign-in, and no analytics, tracking or crash-reporting SDK.</p>
+
+    <h2>2. What is sent out</h2>
+    <h3>AI analysis (off by default, requires your configuration)</h3>
+    <p>This is the only feature that uses the network. With no model provider configured, the app makes no requests at all.</p>
+    <p>When you click AI analysis and have selected a provider (OpenAI, Anthropic, DeepSeek, or any compatible endpoint including a local Ollama instance), Cleanling sends <strong>to the address you configured</strong>:</p>
+    <ul>
+      <li>the <strong>metadata</strong> from this scan: paths relative to your home folder, item type, logical and allocated size, file count, last modification date, verdict category and note, and the rule that matched;</li>
+      <li>total and available disk space;</li>
+      <li>if the item count exceeded the cap, how many were omitted.</li>
+    </ul>
+    <p>The summary has a hard cap (at most 120 items, the largest by size), so the amount sent does not grow with disk size.</p>
+    <p><strong>File contents are not sent by default.</strong> Only if you explicitly enable content sampling does Cleanling read the first few bytes of small text files that meet the trigger conditions. Before sending, the sample passes a secret-fingerprint check; on a match the whole sample is discarded and only “this looks like a secret” is reported.</p>
+    <p><strong>API keys</strong> live in your own configuration file or environment variables. They are used only to call the provider you selected, are never sent anywhere else, and never appear in logs or error messages.</p>
+
+    <h3>What the provider does with it</h3>
+    <p>The provider you choose (DeepSeek, OpenAI, Anthropic, or your own Ollama) handles the received summary under its own privacy policy. That part is outside Cleanling's control. Do not place information you would not share with that provider in folders that will be scanned, or use a model running on your own machine.</p>
+
+    <h3>What is never collected</h3>
+    <p>Cleanling does not collect or upload your name, email address, device identifiers, usage statistics or crash reports. Beyond the connection necessarily made to the model provider you selected, no network traffic is generated.</p>
+
+    <h2>3. macOS permissions</h2>
+    <p>Reading some cache folders under <code>~/Library</code> requires Full Disk Access in System Settings → Privacy &amp; Security. That permission is granted by macOS, and Cleanling can only read paths the system allows. Without it the app still works with a smaller scope and tells you which folders could not be read.</p>
+
+    <h2>4. Your choices</h2>
+    <ul>
+      <li>Configure no model provider: AI analysis stays unavailable, everything else works, and the app does not use the network.</li>
+      <li>Remove keys from the configuration, switch to environment variables, or point the provider at a local model.</li>
+      <li>Permanently delete quarantined files at any time, or clear the audit records.</li>
+      <li>Uninstalling stops all processing; the configuration and audit database left on disk can be deleted directly.</li>
+    </ul>
+
+    <h2>5. Children</h2>
+    <p>Cleanling is a tool for developers and is not directed at children under 13. It does not knowingly collect information from them.</p>
+
+    <h2>6. Changes</h2>
+    <p>Updates to this policy ship with app releases and change the date above.</p>
+
+    <h2>7. Contact</h2>
+    <p>Questions:</p>
+    <div class="contact">
+      <strong>leo@dbi.ltd</strong>
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <span><img src="/assets/logo.png" alt="Cleanling icon" style="width:24px;height:24px;border-radius:6px;display:inline;vertical-align:middle;"> Cleanling</span>
+    <nav class="footer-links">
+      <a href="/en/">Home</a>
+      <a href="/support/en.html">Support</a>
+      <a href="/privacy/">简体中文</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>

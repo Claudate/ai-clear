@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cleanling — Dev Cache Cleaner for macOS</title>
+<meta name="description" content="Cleanling reclaims the space that AI coding tools and build processes leave behind. Scans read-only, moves to quarantine by default, restorable for 7 days.">
+<link rel="icon" type="image/png" href="/assets/logo.png">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body class="en">
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/en/"><img src="/assets/logo.png" alt="Cleanling icon">Cleanling</a>
+    <nav class="nav">
+      <a href="/en/" aria-current="page">Home</a>
+      <a href="/support/en.html">Support</a>
+      <a href="/privacy/en.html">Privacy</a>
+      <a href="/">简体中文</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <img class="app-icon" src="/assets/logo.png" alt="Cleanling app icon">
+  <h1>Reclaim the space AI coding tools and builds leave behind</h1>
+  <p>Cleanling is a macOS cleanup tool for the caches that Cursor, Claude Code, Codex and VS Code scatter around, plus Rust target directories, node_modules and package manager caches — things that rebuild themselves but keep growing.</p>
+  <div class="cta-row">
+    <a class="btn btn-primary" href="https://apps.apple.com/app/id6829701597">Download on the Mac App Store</a>
+    <a class="btn btn-ghost" href="/support/en.html">Get support</a>
+  </div>
+  <p class="hint">macOS 13+ · No sign-in required · Moves or deletes only after you confirm</p>
+</section>
+
+<section class="section">
+  <div class="lead">
+    <span class="eyebrow">Three rules it does not break</span>
+    <h2>It will not mess with your files</h2>
+    <p>The whole design follows one principle: space is reclaimed, not gambled.</p>
+  </div>
+  <div class="card-grid">
+    <div class="card">
+      <div class="ico">1</div>
+      <h3>Scanning only reads</h3>
+      <p>A scan reads file metadata only. It writes nothing, moves nothing and deletes nothing. It just answers: which space is safely reclaimable?</p>
+    </div>
+    <div class="card">
+      <div class="ico">2</div>
+      <h3>Quarantine by default</h3>
+      <p>Once you confirm, items move to a quarantine area and can be put back for 7 days. Releasing space immediately requires explicitly choosing Direct Delete, which asks for another confirmation.</p>
+    </div>
+    <div class="card">
+      <div class="ico">3</div>
+      <h3>Protected things cannot get in</h3>
+      <p>Keys, configuration and session history are blocked by hard-coded guards built into the binary, so even a broken rule file cannot get past them.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="lead">
+    <span class="eyebrow">Every item says what deleting costs</span>
+    <h2>Not colored dots, a sentence</h2>
+    <p>Specific enough to decide on.</p>
+  </div>
+  <div class="card-grid">
+    <div class="card verdict-green">
+      <span class="tag tag-green">Reclaimable</span>
+      <h3>Rebuilds automatically</h3>
+      <p>Pure cache files. Deleting them has no impact on use; they regenerate on the next run.</p>
+    </div>
+    <div class="card verdict-amber">
+      <span class="tag tag-amber">Costly</span>
+      <h3>Space freed, but recompile/redownload</h3>
+      <p>Build artifacts and dependency caches — usually the biggest items, with a real cost for the next build or download. Costly items are unchecked by default; the decision is yours.</p>
+    </div>
+    <div class="card verdict-red">
+      <span class="tag tag-red">Protected</span>
+      <h3>Never moved</h3>
+      <p>Your records, keys and configuration. The tool will not touch them or list them as cleanup candidates.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="lead">
+    <span class="eyebrow">Optional AI analysis</span>
+    <h2>Local verdicts first; AI is just an assistant</h2>
+    <p>Scanning and verdicts happen entirely on your Mac. Only when you configure a model provider in Settings and click AI analysis does Cleanling send a summary of the current scan to that provider.</p>
+  </div>
+  <div class="card-grid">
+    <div class="card">
+      <div class="ico">·</div>
+      <h3>No upload by default</h3>
+      <p>With no provider configured, the app makes no network requests at all. Paths, sizes and verdicts are handled locally.</p>
+    </div>
+    <div class="card">
+      <div class="ico">·</div>
+      <h3>Summary only, not file contents</h3>
+      <p>What is sent is scan metadata (relative paths, types, sizes, verdicts) with a hard cap. File contents are not sent by default, and content sampling includes a secret-fingerprint check.</p>
+    </div>
+    <div class="card">
+      <div class="ico">·</div>
+      <h3>AI never executes on its own</h3>
+      <p>AI proposals are verified item by item before anything runs, and still follow the three rules above.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="lead">
+    <span class="eyebrow">The interface</span>
+    <h2>Clear at a glance</h2>
+    <p>Occupancy ranking, the reclaimable list, quarantine and history — all readable on one screen.</p>
+  </div>
+  <div class="screens">
+    <figure><img src="/assets/01-free-space.png" alt="Overview screen"><figcaption>Home: available space, reclaimable amount, last scan</figcaption></figure>
+    <figure><img src="/assets/02-every-item.png" alt="Item verdicts"><figcaption>Every item states the verdict and the cost of deletion</figcaption></figure>
+    <figure><img src="/assets/03-quarantine.png" alt="Quarantine"><figcaption>Quarantine: restorable for 7 days</figcaption></figure>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <span><img src="/assets/logo.png" alt="Cleanling icon" style="width:24px;height:24px;border-radius:6px;display:inline;vertical-align:middle;"> Cleanling</span>
+    <nav class="footer-links">
+      <a href="/support/en.html">Support</a>
+      <a href="/privacy/en.html">Privacy Policy</a>
+      <a href="/">简体中文</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>

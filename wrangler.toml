@@ -1,0 +1,9 @@
+name = "aiclear"
+compatibility_date = "2025-06-01"
+
+[assets]
+directory = "./site"
+
+[[routes]]
+pattern = "aiclear.openclawbot.cn"
+custom_domain = true

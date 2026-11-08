@@ -1,56 +1,50 @@
-fastlane documentation
-----
+# fastlane 配置
 
-# Installation
+这个目录是 `store/` 物料的**产物**，不是来源：`metadata/` 与 `screenshots/`
+由 `store/tools/sync_fastlane.py` 从 `store/` 单向同步过来，不要在这里手改
+（下次同步会覆盖）。
 
-Make sure you have the latest version of the Xcode command line tools installed:
+fastlane 每次运行会重写这个 README。本文件由同步脚本写入，
+若被覆盖，重跑 `python3 store/tools/sync_fastlane.py` 即可恢复。
 
-```sh
-xcode-select --install
+## 四条 lane
+
+```bash
+cd store/fastlane
+FASTLANE_SKIP_UPDATE_CHECK=1 fastlane ios <lane>   # 跳过更新检查，输出才看得清
 ```
 
-For _fastlane_ installation instructions, see [Installing _fastlane_](https://docs.fastlane.tools/#installing-fastlane)
+| lane | 做什么 |
+|---|---|
+| `preflight` | 只检查，什么都不做。缺什么直接列出来 |
+| `metadata` | 同步商店页（文案 + 截图），不动二进制 |
+| `upload` | 传二进制（转调 `store/tools/upload.sh`） |
+| `release` | 传二进制 → 等处理 → 同步商店页 |
 
-# Available Actions
+## 目录约定
 
-## iOS
-
-### ios preflight
-
-```sh
-[bundle exec] fastlane ios preflight
+```
+metadata/
+├── zh-Hans/  en-US/
+│   ├── name.txt  subtitle.txt  keywords.txt
+│   ├── promotional_text.txt  description.txt  release_notes.txt
+│   ├── support_url.txt  privacy_url.txt  marketing_url.txt
+└── review_information/
+    ├── notes.txt                store/review-notes.md 的英文正文
+    └── first_name / last_name / email_address / phone_number.txt  （需自己填）
+screenshots/
+└── zh-Hans/  en-US/  *.png      文件名编号决定商店里的排列顺序
 ```
 
-检查上架所需的一切是否就位
+## 两个 URL 必须填真地址
 
-### ios metadata
+`support_url.txt` 与 `privacy_url.txt` 现在还是 `example.com` 占位值，
+`preflight` 会把它们判为未通过。Apple 会实际抓取这两个地址，抓不到就提交不了。
+填法：直接改 `store/fastlane/metadata/<locale>/` 下的两个文件，
+或改 `store/tools/sync_fastlane.py` 里的 `PLACEHOLDERS` 再同步一次。
 
-```sh
-[bundle exec] fastlane ios metadata
-```
+## 审核联系人
 
-同步商店页文案与截图（不传二进制）
-
-### ios upload
-
-```sh
-[bundle exec] fastlane ios upload
-```
-
-上传已签名的 .pkg（等价于 Xcode Organizer 的 Distribute）
-
-### ios release
-
-```sh
-[bundle exec] fastlane ios release
-```
-
-完整上架：传二进制 → 等处理 → 同步商店页
-
-----
-
-This README.md is auto-generated and will be re-generated every time [_fastlane_](https://fastlane.tools) is run.
-
-More information about _fastlane_ can be found on [fastlane.tools](https://fastlane.tools).
-
-The documentation of _fastlane_ can be found on [docs.fastlane.tools](https://docs.fastlane.tools).
+`metadata/review_information/` 下的姓名、邮箱、电话是空的占位文件，
+必须填真人真联系方式。审核被拒时 Apple 先发邮件再在 Resolution Center 留言，
+联系方式不实是常见的无谓延误。

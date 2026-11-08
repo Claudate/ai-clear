@@ -48,6 +48,8 @@
 `store/privacy-policy.zh-Hans.md` / `.en-US.md` 需要发布到网站上再填链接。
 App Store Connect 会实际抓取这个地址，抓不到就提交不了。
 
+已选用：**https://aiclear.openclawbot.cn/privacy/**（中英双语，与支持网址同域）。
+
 ## 五、审核备注里必须主动交代的三件事
 
 Apple 审核员不会去猜一个清理工具为什么要读 `~/Library`。以下三点写进

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Support · Cleanling</title>
+<meta name="description" content="Cleanling help and FAQ: Full Disk Access, whether scanning uploads anything, quarantine, AI analysis, and duplicate file search.">
+<link rel="icon" type="image/png" href="/assets/logo.png">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body class="en">
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/en/"><img src="/assets/logo.png" alt="Cleanling icon">Cleanling</a>
+    <nav class="nav">
+      <a href="/en/">Home</a>
+      <a href="/support/en.html" aria-current="page">Support</a>
+      <a href="/privacy/en.html">Privacy</a>
+      <a href="/support/">简体中文</a>
+    </nav>
+  </div>
+</header>
+
+<section class="section">
+  <div class="prose">
+    <h1>Support &amp; FAQ</h1>
+    <p class="updated">Cleanling · Updated 2026-11-08</p>
+
+    <h2>Contact</h2>
+    <p>For feedback, suggestions or issues, email us at:</p>
+    <div class="contact">
+      <strong>leo@dbi.ltd</strong>
+    </div>
+    <p>When reporting an issue, please include your macOS version and a description of the steps that triggered it.</p>
+
+    <h2>FAQ</h2>
+    <div class="faq">
+
+      <details open>
+        <summary>Why does Cleanling need Full Disk Access? What happens without it?</summary>
+        <p>Cleanling reads caches under <code>~/Library/Caches</code> and tool directories under <code>~/</code> (such as <code>~/.claude</code>, <code>~/.codex</code>, <code>~/.cargo</code>). macOS protects these paths; they are only visible after you grant Full Disk Access in System Settings → Privacy &amp; Security.</p>
+        <p>Without the permission, Cleanling still runs but only sees a limited set of paths, and the interface tells you which folders could not be read. Scanning is always read-only and never modifies files because of this permission.</p>
+      </details>
+
+      <details>
+        <summary>Does scanning upload my files?</summary>
+        <p>No. Scanning and verdicts happen entirely on your Mac. Paths, sizes and verdicts never leave the device. Cleanling has no accounts, no analytics and no crash reporting.</p>
+        <p>The only network behavior is AI analysis, which is off by default — it sends a summary of the current scan to a provider only when you configure one in Settings and actively click AI analysis. See the <a href="/privacy/en.html">Privacy Policy</a>.</p>
+      </details>
+
+      <details>
+        <summary>What is quarantine, and how long are items kept?</summary>
+        <p>Quarantine is where moved files are kept. After you confirm cleanup, items go to quarantine and are kept for a default of 7 days, restorable to their original location at any time.</p>
+        <p>Direct Delete removes items from their original location without quarantine and asks for a second confirmation. Note that moving to quarantine does not immediately free disk space — space is freed when quarantine contents are purged or expire after 7 days.</p>
+      </details>
+
+      <details>
+        <summary>What does AI analysis send, and to whom?</summary>
+        <p>AI analysis is optional: with no provider configured, the app makes no network requests. Once configured, Cleanling sends a summary of the current scan only to the address you configured (e.g. DeepSeek, OpenAI, Anthropic, or a local Ollama instance) — metadata such as relative paths, item types, sizes and verdicts, capped at 120 items.</p>
+        <p>File contents are not sent by default. Content sampling reads only the first few bytes of small text files and runs a secret-fingerprint check first; on a match the whole sample is dropped. API keys are used only to call the provider you selected.</p>
+      </details>
+
+      <details>
+        <summary>Why are build artifacts unchecked by default?</summary>
+        <p>Build artifacts (like <code>target</code>) are usually the largest items, but deleting them means the next build has to recompile or redownload — a real time cost. They are classed as “costly” and unchecked by default, so the decision stays yours.</p>
+      </details>
+
+      <details>
+        <summary>What does “Find duplicate files” do? Does it delete anything?</summary>
+        <p>“Find duplicate files” finds files with identical content. It only reads files for comparison — it does not delete or move anything. Results list each duplicate group and how much you save by keeping one copy, and you decide which copy to keep.</p>
+        <p>If a scan is truncated by its time budget, the app clearly says “not finished”, so a partial scan is never reported as having no duplicates.</p>
+      </details>
+
+      <details>
+        <summary>Which macOS versions and architectures are supported?</summary>
+        <p>macOS 13.0 (Ventura) or later. The current build targets Apple Silicon (arm64).</p>
+      </details>
+
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <span><img src="/assets/logo.png" alt="Cleanling icon" style="width:24px;height:24px;border-radius:6px;display:inline;vertical-align:middle;"> Cleanling</span>
+    <nav class="footer-links">
+      <a href="/en/">Home</a>
+      <a href="/privacy/en.html">Privacy Policy</a>
+      <a href="/support/">简体中文</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>

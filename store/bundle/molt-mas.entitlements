@@ -23,14 +23,6 @@
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
 
-    <!--
-      这条是收的核心能力：扫描范围就在家目录里（~/.claude、~/.codex、
-      ~/Library/Application Support/*）。没有它，沙箱版只能看到一个空清单。
-      macOS 会在首次访问时弹窗要求用户确认。
-    -->
-    <key>com.apple.security.files.home-relative-path.read-only</key>
-    <true/>
-
     <!-- 用户可能在外部卷上放项目（target 目录）。 -->
     <key>com.apple.security.files.downloads.read-only</key>
     <true/>

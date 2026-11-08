@@ -30,13 +30,14 @@ FIELDS = (
     "release_notes",
 )
 
-# 两个必填 URL 都已真实发布并实测 HTTP 200：
-#   privacy_url → GitHub Pages（仓库 Claudate/molt-privacy）
-#   support_url → 同一仓库的 Issues（已开启，用户直接开 issue）
+# 两个必填 URL + 营销 URL 均已真实发布并实测 HTTP 200：
+#   privacy_url → aiclear.openclawbot.cn/privacy/
+#   support_url → aiclear.openclawbot.cn/support/
+#   marketing_url → aiclear.openclawbot.cn/（官网首页）
 PLACEHOLDERS = {
-    "support_url": "https://github.com/Claudate/molt-privacy/issues",
-    "privacy_url": "https://claudate.github.io/molt-privacy/",
-    "marketing_url": "",
+    "support_url": "https://aiclear.openclawbot.cn/support/",
+    "privacy_url": "https://aiclear.openclawbot.cn/privacy/",
+    "marketing_url": "https://aiclear.openclawbot.cn/",
 }
 
 

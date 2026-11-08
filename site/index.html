@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>净灵 · Cleanling — macOS 开发缓存清理工具</title>
+<meta name="description" content="净灵只做一件事：把 AI 编程工具与构建过程留下的缓存安全腾出来。扫描只读，默认移入隔离区，7 天内可还原。">
+<link rel="icon" type="image/png" href="/assets/logo.png">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/"><img src="/assets/logo.png" alt="净灵图标">净灵 · Cleanling</a>
+    <nav class="nav">
+      <a href="/" aria-current="page">首页</a>
+      <a href="/support/">支持</a>
+      <a href="/privacy/">隐私</a>
+      <a href="/en/">English</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <img class="app-icon" src="/assets/logo.png" alt="净灵应用图标">
+  <h1>把 AI 工具与构建产物留下的缓存，安全地腾出来</h1>
+  <p>净灵是 macOS 上的清理工具，专门清理 Cursor、Claude Code、Codex、VS Code 等工具散落的缓存，以及 target、node_modules、包管理器缓存 — 删了会自动重建，但会一直长大。</p>
+  <div class="cta-row">
+    <a class="btn btn-primary" href="https://apps.apple.com/app/id6829701597">在 Mac App Store 下载</a>
+    <a class="btn btn-ghost" href="/support/">查看支持</a>
+  </div>
+  <p class="hint">macOS 13 及以上 · 无需登录 · 只在你确认后移动或删除</p>
+</section>
+
+<section class="section">
+  <div class="lead">
+    <span class="eyebrow">三条硬约束</span>
+    <h2>不会乱动你的文件</h2>
+    <p>整个设计围绕同一个原则：空间是腾出来的，不是赌出来的。</p>
+  </div>
+  <div class="card-grid">
+    <div class="card">
+      <div class="ico">1</div>
+      <h3>扫描只读</h3>
+      <p>扫描过程只读取文件元数据，不写任何文件，不移动、不删除。它只是在回答一个问题：哪些空间可以安全回收。</p>
+    </div>
+    <div class="card">
+      <div class="ico">2</div>
+      <h3>默认移入隔离区</h3>
+      <p>确认后内容先进隔离区，7 天内随时还原。想立刻释放空间，才需要显式选择「直接清理」，并且会再确认一次。</p>
+    </div>
+    <div class="card">
+      <div class="ico">3</div>
+      <h3>受保护的东西进不去</h3>
+      <p>密钥、配置、会话历史由内嵌的硬禁区挡住，即使规则库写错也拦得住。保护优先级高于一切规则。</p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="lead">
+    <span class="eyebrow">判定的三档</span>
+    <h2>每一项都写清删了会怎样</h2>
+    <p>不是红黄绿三个色块，而是具体到能下决心的一句话。</p>
+  </div>
+  <div class="card-grid">
+    <div class="card verdict-green">
+      <span class="tag tag-green">可回收</span>
+      <h3>删掉会自动重建</h3>
+      <p>例如纯缓存文件。删掉后不影响使用，下次运行会重新生成。</p>
+    </div>
+    <div class="card verdict-amber">
+      <span class="tag tag-amber">有代价</span>
+      <h3>能腾出来，但要重新编译/下载</h3>
+      <p>例如构建产物与依赖缓存，通常体积最大，但对下一步编译或下载时间有代价。「有代价」默认不勾选，由你决定。</p>
+    </div>
+    <div class="card verdict-red">
+      <span class="tag tag-red">受保护</span>
+      <h3>永远不会被移动</h3>
+      <p>你的记录、密钥、配置。工具不会碰它们，也不会把它们列为清理候选。</p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="lead">
+    <span class="eyebrow">AI 深度分析（可选）</span>
+    <h2>本地判定为主，AI 只是助手</h2>
+    <p>扫描与判定全在 Mac 本机完成。只有当你在设置里配置了一个模型服务、并主动点击「AI 分析」时，净灵才会把当次扫描的一份摘要发给那个服务。</p>
+  </div>
+  <div class="card-grid">
+    <div class="card">
+      <div class="ico">·</div>
+      <h3>默认不上传</h3>
+      <p>不配置模型服务时，程序不发任何网络请求。路径、体积、判定结果均在本机处理。</p>
+    </div>
+    <div class="card">
+      <div class="ico">·</div>
+      <h3>只发摘要，不发文件内容</h3>
+      <p>发送的是扫描摘要元数据（相对路径、类型、大小、判定），有数量上限。文件内容默认不发送，开启「内容采样」也有密钥指纹拦截。</p>
+    </div>
+    <div class="card">
+      <div class="ico">·</div>
+      <h3>AI 不会擅自执行</h3>
+      <p>AI 方案在本地逐条核对后才执行，每一项仍遵循上面的三条硬约束。</p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="lead">
+    <span class="eyebrow">界面</span>
+    <h2>一目了然</h2>
+    <p>空间占用排行、可回收清单、隔离区与历史，全部一屏可读。</p>
+  </div>
+  <div class="screens">
+    <figure><img src="/assets/01-free-space.png" alt="首页空间占用概览"><figcaption>首页：可用空间、可清理量与上次扫描一目了然</figcaption></figure>
+    <figure><img src="/assets/02-every-item.png" alt="每项判定明细"><figcaption>每一项写明判定与删除代价，而不是颜色块</figcaption></figure>
+    <figure><img src="/assets/03-quarantine.png" alt="隔离区"><figcaption>隔离区：7 天内可随时还原</figcaption></figure>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <span><img src="/assets/logo.png" alt="净灵图标" style="width:24px;height:24px;border-radius:6px;display:inline;vertical-align:middle;"> 净灵 · Cleanling</span>
+    <nav class="footer-links">
+      <a href="/support/">支持</a>
+      <a href="/privacy/">隐私政策</a>
+      <a href="/en/">English</a>
+    </nav>
+  </div>
+</footer>
+
+</body>
+</html>

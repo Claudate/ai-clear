@@ -22,15 +22,22 @@ BUNDLE_ID_DEV="app.molt.mac"     # 两渠道同 ID，便于将来从直供转上
 BUILD_DIR="target/dist"
 APP="$BUILD_DIR/收.app"
 
-VERSION="$(awk -F'"' '/^version[[:space:]]*=[[:space:]]*"/{print $2; exit}' Cargo.toml)"
-if [[ -z "$VERSION" ]]; then
+SOURCE_VERSION="$(awk -F'"' '/^version[[:space:]]*=[[:space:]]*"/{print $2; exit}' Cargo.toml)"
+if [[ -z "$SOURCE_VERSION" ]]; then
   echo "读不到 Cargo.toml 里的 version" >&2
   exit 1
 fi
+# MAS_VERSION / MAS_BUILD 允许商店版本独立于 workspace 发布版本，避免把内部
+# crate 版本号误当成 App Store Connect 当前版本；未指定时仍沿用 Cargo.toml。
+VERSION="${MAS_VERSION:-$SOURCE_VERSION}"
 # CFBundleVersion 必须是纯数字点分（App Store 会拒带字母的），
 # 而 cargo 的版本号可能带 -beta。这里把预发布后缀折成 0，主版本原样保留。
-BUILD="$(echo "$VERSION" | sed -E 's/[^0-9.].*$//; s/\.+$//')"
-[[ "$BUILD" == *.* ]] || BUILD="$BUILD.0"
+if [[ -n "${MAS_BUILD:-}" ]]; then
+  BUILD="$MAS_BUILD"
+else
+  BUILD="$(echo "$VERSION" | sed -E 's/[^0-9.].*$//; s/\.+$//')"
+  [[ "$BUILD" == *.* ]] || BUILD="$BUILD.0"
+fi
 
 echo "版本 $VERSION（build $BUILD）  渠道 $CHANNEL"
 
@@ -48,6 +55,19 @@ cp target/release/molt-gui "$APP/Contents/MacOS/molt-gui"
 # 用户要写脚本时不必再另装一次，macOS 上也符合「一个 App 一个包里自包含」。
 cp target/release/molt "$APP/Contents/MacOS/molt"
 cp store/icon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp store/bundle/PrivacyInfo.xcprivacy "$APP/Contents/Resources/PrivacyInfo.xcprivacy"
+
+if [[ "$CHANNEL" == "mas" ]]; then
+  PROFILE="$HOME/Library/MobileDevice/Provisioning Profiles/Cleanling_MAS.provisionprofile"
+  if [[ ! -f "$PROFILE" ]]; then
+    echo "找不到匹配 app.molt.mac 的 Cleanling_MAS.provisionprofile：$PROFILE" >&2
+    exit 1
+  fi
+  # 将与 MAS bundle id 匹配的 profile 嵌入最终 App，供签名审计和系统加载校验。
+  cp -p "$PROFILE" "$APP/Contents/embedded.provisionprofile"
+  # 浏览器下载的 profile 可能带 quarantine/来源元数据；它们不属于发布包。
+  xattr -c "$APP/Contents/embedded.provisionprofile" 2>/dev/null || true
+fi
 
 BUNDLE_ID="$BUNDLE_ID_MAS"
 [[ "$CHANNEL" == "dev" ]] && BUNDLE_ID="$BUNDLE_ID_DEV"

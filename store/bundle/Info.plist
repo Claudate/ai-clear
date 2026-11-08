@@ -56,5 +56,10 @@
     <!-- 程序不含 PyObjC 之类的脚本桥，显式关闭以缩小攻击面。 -->
     <key>NSAppleScriptEnabled</key>
     <false/>
+
+    <!-- 只使用系统标准 TLS（HTTPS），不使用任何需申报的加密算法，
+         该键置 false 即为出口合规声明（ITSAppUsesNonExemptEncryption）。 -->
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
 </dict>
 </plist>
