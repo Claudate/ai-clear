@@ -22,14 +22,10 @@ pub enum Page {
     Workbench,
     /// 隔离区：固定入口，查看 / 还原 / 彻底删除
     Quarantine,
-    /// 卸载：列出已装应用与它们的残留
-    Uninstall,
     /// 历史：发生过什么，只读
     History,
     /// 自动化：定时清理
     Automation,
-    /// 工具：随手用的功能（新建、临时空间、重扫），自成一个页面
-    Tools,
     /// 设置：AI 配置（含 jev）与规则信息
     Settings,
 }
@@ -39,10 +35,8 @@ impl Page {
         match self {
             Page::Workbench => "清理",
             Page::Quarantine => "临时空间",
-            Page::Uninstall => "卸载",
             Page::History => "历史",
             Page::Automation => "自动清理",
-            Page::Tools => "工具",
             Page::Settings => "设置",
         }
     }
@@ -53,34 +47,28 @@ impl Page {
         match self {
             Page::Workbench => NavIcon::Gauge,
             Page::Quarantine => NavIcon::Archive,
-            Page::Uninstall => NavIcon::Box,
             Page::History => NavIcon::Clock,
             Page::Automation => NavIcon::Calendar,
-            Page::Tools => NavIcon::Wrench,
             Page::Settings => NavIcon::Gear,
         }
     }
 
-    pub const ALL: [Page; 7] = [
+    pub const ALL: [Page; 5] = [
         Page::Workbench,
         Page::Quarantine,
-        Page::Uninstall,
         Page::History,
         Page::Automation,
-        Page::Tools,
         Page::Settings,
     ];
 
-    /// 顶栏图标的编排：组内相邻，组间一道竖线隔开。
+    /// 侧栏导航的编排：组内相邻，组间留白。
     ///
-    /// 七个图标等距排成一条时，用户得把每个都扫一遍才知道哪个在哪；
-    /// 分成「清理 / 应用与记录 / 设置」三段之后，先定位到组、再在组里找，
-    /// 是两步而不是七步。组内顺序仍是 `ALL` 的顺序，所以「从左到右读一遍」
-    /// 与 `ALL` 一致，不必记两套。
+    /// 五个入口分三段：清理主线一条、历史单独、设置收尾。
+    /// 组内顺序仍是 `ALL` 的顺序，从左到右读一遍与 `ALL` 一致。
     pub const NAV_GROUPS: [&'static [Page]; 3] = [
         &[Page::Workbench, Page::Quarantine],
-        &[Page::Uninstall, Page::History],
-        &[Page::Automation, Page::Tools, Page::Settings],
+        &[Page::History],
+        &[Page::Automation, Page::Settings],
     ];
 }
 
@@ -146,10 +134,9 @@ pub enum Filter {
     All,
     /// 「现在就能清」：建议清理 + 可回收。首页只露这一档时最常用的一种看法。
     Cleanable,
-    /// 最近 30 天没动过：把「建议清理」这一档单独露出来。
+    /// 久未使用：规则里写了 `stale_days`，且实测闲置天数已越过阈值。
+    /// 与「建议清掉」不是一回事——后者还含 AI 判过可以动的条目。
     Recent,
-    /// 建议优先处理：有代价但久未使用，或 AI 判定可以动
-    Suggested,
     Reclaimable,
     Costly,
     Protected,
@@ -159,7 +146,7 @@ pub enum Filter {
 ///
 /// 用它排序，而不是只按体积：用户打开界面要知道的是「先清哪个」，
 /// 不是「哪个最大」。最大的那几项往往是有代价的构建产物，最不该先动。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Priority {
     /// 建议清理：有代价但很久没用，或 AI 判定可以动
     Suggested = 0,
@@ -186,13 +173,8 @@ impl Priority {
             Priority::Suggested => "很久没用了，清掉代价最小",
             Priority::Safe => "删了会自动重建，不影响使用",
             Priority::Costly => "能腾出空间，但下次要重新编译 / 下载",
-            Priority::Keep => "你的记录、密钥或正在被使用的内容，不会被移动",
+            Priority::Keep => "受保护项不能清理；AI 建议保留的缓存由你决定",
         }
-    }
-
-    /// 这一档能不能勾选。
-    pub fn selectable(self) -> bool {
-        !matches!(self, Priority::Keep)
     }
 }
 
@@ -235,6 +217,8 @@ pub struct QuarantineRow {
     pub bytes: u64,
     pub at: String,
     pub purge_after: String,
+    /// 仅当隔离路径确实位于本应用的单层批次目录下才有值。
+    pub batch: Option<String>,
     pub restorable: bool,
 }
 
@@ -289,151 +273,6 @@ impl PendingPurge {
     /// 要删除的记录编号。执行只认这些，不再回头看当前勾选。
     pub fn ids(&self) -> Vec<i64> {
         self.items.iter().map(|i| i.id).collect()
-    }
-}
-
-/// 卸载页要展示的一个应用。
-///
-/// 与 `molt_act::AppEntry` 分开一份，是因为界面需要「这个应用被勾了哪几项」
-/// 这类纯展示状态；写盘层只认路径。
-#[derive(Debug, Clone)]
-pub struct AppRow {
-    pub name: String,
-    /// 缩成 `~/...` 或原样的本体路径
-    pub path: String,
-    pub bundle_id: Option<String>,
-    pub bytes: u64,
-    /// 体积是否已经量过。
-    ///
-    /// 只用 `bytes == 0` 判断「还没量」会把**真的很小或量不出来**的应用也画成
-    /// 「正在量…」——那样一个永远量不完的应用就让格子永久停在加载态。
-    /// 分开之后：没量过写「正在量…」，量过而结果是 0 就老老实实写 0 B。
-    pub bytes_known: bool,
-    pub leftovers: Vec<LeftoverRow>,
-    /// 残留总和，列表里直接用
-    pub leftover_bytes: u64,
-    /// `CFBundleIconFile`。取图标时用它定位 `.icns`，缺了就去资源目录里找。
-    pub icon_file: Option<String>,
-    /// 残留是否已经找过。
-    ///
-    /// 清单出来时是 `false`——残留不再跟着列应用一起扫（个别应用能扫上十分钟）。
-    /// 用户点开它时才去扫，扫之前界面显示「正在找残留…」，扫完才谈得上勾选。
-    /// `false` 与「找到了 0 条」必须能分开：前者是不确定，后者是确定没有。
-    pub leftovers_loaded: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct LeftoverRow {
-    pub path: String,
-    pub display: String,
-    pub category: &'static str,
-    pub bytes: u64,
-    /// 落在 `/Library` 下、要管理员权限。界面上照常列出并标注，
-    /// 不能因为删不掉就当它不存在——用户刚按的是「卸载干净」。
-    pub needs_admin: bool,
-    /// 体积没量完（目录读不动）。此时 `bytes` 只是下界，界面要如实说明，
-    /// 不能把半截数字当成完整大小。
-    pub unmeasured: bool,
-}
-
-/// 卸载页的全部状态。
-#[derive(Debug, Default)]
-pub struct UninstallPanel {
-    pub apps: Vec<AppRow>,
-    /// 这份清单是什么时候列出来的。`None` 表示还没列过。
-    ///
-    /// 切回这一页不该重新遍历一遍 `/Applications`、更不该把每个 bundle 的体积
-    /// 再量一次——那是几秒钟的等待，而用户只是从别的页签点回来。
-    /// 保留时间戳是为了在标题上如实写「多久之前读的」，让「重新扫描」有依据。
-    pub listed_at: Option<std::time::SystemTime>,
-    pub error: Option<String>,
-    pub loading: bool,
-    /// 悬浮窗里正在看的那个应用（按本体路径识别）。`None` 表示没有浮窗。
-    pub open: Option<String>,
-    /// 需要用户看清楚的说明（比如「这个应用在运行，先退出」）
-    pub note: Option<String>,
-    /// 扫描过的目录，界面上写清楚「我没看哪里」
-    pub scanned_dirs: Vec<String>,
-    /// 正在为哪个应用找残留（本体路径）。页面据此显示「正在找残留…」。
-    pub leftovers_loading: Option<String>,
-    /// 右键点了「卸载」但残留还没扫过：等这一轮扫完再弹确认框。
-    ///
-    /// 不留这个标记就只能拿「此刻已知的残留」凑批次——而此刻很可能一条都还不知道，
-    /// 结果就是「卸载干净」只卸掉了 `.app` 本体。
-    pub pending_uninstall_after_scan: Option<String>,
-    /// 已经发起卸载、正在离开磁盘的那个应用（本体路径）。
-    ///
-    /// 卸载是后台线程跑的，界面只能靠事实判断成败：本体从磁盘上消失了才算成功。
-    pub removing: Option<String>,
-}
-
-impl UninstallPanel {
-    /// 垃圾桶、系统目录这些永远不列——列出来又标成不可选，只是给用户看废行。
-    pub fn is_open(&self, path: &str) -> bool {
-        self.open.as_deref() == Some(path)
-    }
-
-    /// 当前展开的那个应用。
-    pub fn current(&self) -> Option<&AppRow> {
-        let key = self.open.as_deref()?;
-        self.apps.iter().find(|a| a.path == key)
-    }
-
-    /// 悬浮窗里要列的文件条数（本体 + 残留）。
-    pub fn file_count(&self) -> usize {
-        self.current().map(|a| 1 + a.leftovers.len()).unwrap_or(0)
-    }
-
-    /// 这个应用全部加起来的体积。
-    pub fn total_bytes(&self) -> u64 {
-        self.current()
-            .map(|a| a.bytes + a.leftover_bytes)
-            .unwrap_or(0)
-    }
-}
-
-/// 新建窗口的状态。
-///
-/// 这里存的是**输入**，不是结果：预览由 `molt_act::CreatePlan::preflight`
-/// 现算，不缓存——缓存会让「输入改了、数字没变」这种假象出现。
-#[derive(Debug, Clone, Default)]
-pub struct CreatePanel {
-    pub open: bool,
-    /// 建在哪里
-    pub root: String,
-    /// 要建的东西，一行一条
-    pub lines: String,
-    pub tab: CreateTab,
-    /// 上一次创建的结果，用来显示「撤销」按钮
-    pub last: Option<molt_act::CreateReport>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CreateTab {
-    #[default]
-    Skeleton,
-    Dirs,
-    Files,
-}
-
-impl CreateTab {
-    pub fn label(self) -> &'static str {
-        match self {
-            CreateTab::Skeleton => "项目骨架",
-            CreateTab::Dirs => "文件夹",
-            CreateTab::Files => "文件",
-        }
-    }
-
-    pub const ALL: [CreateTab; 3] = [CreateTab::Skeleton, CreateTab::Dirs, CreateTab::Files];
-}
-
-impl CreatePanel {
-    /// 当前输入对应的预检结果。纯只读，每帧现算都够快（最多 500 行）。
-    pub fn plan(&self, home: &str) -> molt_act::CreatePlan {
-        let specs = molt_act::create::parse_lines(&self.lines);
-        molt_act::CreatePlan::preflight(std::path::Path::new(&self.root), &specs, home)
     }
 }
 
@@ -551,7 +390,7 @@ impl NextStep {
 ///
 /// 不按每个 `HistoryAction` 各给一档：「彻底删除」与「直接清理」对用户是
 /// 同一件事（永久没了），分成两档只会让两边的数字都变小、看不出总量。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum HistoryFilter {
     #[default]
     All,
@@ -590,6 +429,10 @@ pub struct AppState {
     /// 正在盘点某个应用的残留（点开它时才启动）
     pub leftover_job: Option<crate::worker::LeftoverJob>,
     pub schedule_job: Option<crate::schedule::ScheduleJob>,
+    /// 重复文件扫描的后台任务。
+    pub duplicate_job: Option<crate::worker::DuplicateJob>,
+    /// 上次重复扫描的结果。
+    pub duplicate_scan: Option<Arc<molt_scan::DuplicateScan>>,
     pub result: Option<Arc<ScanResult>>,
     /// 当前这份结果是本次运行真的扫出来的，而不是启动时读的缓存。
     ///
@@ -598,6 +441,8 @@ pub struct AppState {
     pub scanned_now: bool,
     /// 已勾选的路径。只有可动项会进来。
     pub checked: HashSet<String>,
+    /// 按优先级与项目/工具键保存收起的子组；扫描刷新不影响用户正在看的层级。
+    pub collapsed_groups: HashSet<(Priority, String)>,
     pub filter: Filter,
     pub query: String,
     /// 搜索框的**草稿**。`TextEdit` 需要一个 `&mut String`，而视图现在只拿到
@@ -612,11 +457,12 @@ pub struct AppState {
     pub history_error: Option<String>,
     pub history_filter: HistoryFilter,
     pub status: Option<StatusMessage>,
-    pub restoring: Option<i64>,
     pub rules: Option<molt_core::RuleSet>,
     /// 设置页的「高级」是否展开。默认收起：base_url / 环境变量名不是
     /// 每次都要看的东西，但排障时必须能拿到。
     pub settings_advanced: bool,
+    /// 当前字号缩放。默认大字号；其余两档由设置页显式选择。
+    pub display_scale: f32,
     /// 设置页里正在输入的密钥。**只存在内存里**，保存后立即清空——
     /// 它绝不能跟着窗口状态被持久化，也不能被回填进输入框。
     pub key_draft: String,
@@ -655,10 +501,6 @@ pub struct AppState {
     /// 两者在环心不能写同一句话：放进临时空间并没有释放空间，
     /// 写「已腾出」就是在骗人。
     pub clean_was_delete: bool,
-    /// 卸载页
-    pub uninstall: UninstallPanel,
-    /// 新建文件夹/文件窗口
-    pub create: CreatePanel,
 }
 
 /// 自动化页的状态。
@@ -676,6 +518,8 @@ pub struct AutoPanel {
     pub last_run: Option<crate::schedule::LastRun>,
     /// launchd 里现在是否真的加载着。`None` 表示还没查。
     pub installed: Option<bool>,
+    /// 查询任务状态失败时的具体原因，界面直接展示，避免「为什么没加载」成谜。
+    pub installed_error: Option<String>,
     /// 正在写配置 / 装载 launchd。期间按钮置灰，防止重复点。
     pub saving: bool,
 }
@@ -741,9 +585,12 @@ impl AppState {
             app_scan_job: None,
             leftover_job: None,
             schedule_job: None,
+            duplicate_job: None,
+            duplicate_scan: None,
             result: None,
             scanned_now: false,
             checked: HashSet::new(),
+            collapsed_groups: HashSet::new(),
             filter: Filter::All,
             query: String::new(),
             query_draft: String::new(),
@@ -756,9 +603,9 @@ impl AppState {
             history_error: None,
             history_filter: HistoryFilter::All,
             status: None,
-            restoring: None,
             rules: None,
             settings_advanced: false,
+            display_scale: crate::theme::Theme::DEFAULT_SCALE,
             key_draft: String::new(),
             home,
             error: None,
@@ -777,8 +624,6 @@ impl AppState {
             clean_done_secs: 0.0,
             clean_was_running: false,
             clean_was_delete: false,
-            uninstall: UninstallPanel::default(),
-            create: CreatePanel::default(),
         }
     }
 
@@ -831,7 +676,7 @@ impl AppState {
             Activity::Purging
         } else if self.is_scheduled() {
             Activity::Schedule
-        } else if self.restoring.is_some() || self.restore_job.is_some() {
+        } else if self.restore_job.is_some() {
             Activity::Restoring
         } else if self.is_listing() {
             Activity::Listing
@@ -847,6 +692,11 @@ impl AppState {
     /// 能不能改勾选。执行期间改勾选会让用户以为这一批变了，而实际执行的是按下确认那一刻的清单。
     pub fn can_select(&self) -> bool {
         !self.is_busy()
+    }
+
+    /// 能否手动选择这条候选，只看本地确定性判定，AI 建议和展示档位均不扩大权限。
+    pub fn item_actionable(c: &molt_core::Candidate) -> bool {
+        !matches!(c.verdict, molt_core::Verdict::Protected { .. })
     }
 
     /// 能不能开始一个新的、会碰盘或占网络的动作。
@@ -917,7 +767,7 @@ impl AppState {
         (self.checked_count(), self.checked_bytes())
     }
 
-    /// 把当前筛选下能动手的项全部选中（受保护与「建议保留」不进来）。
+    /// 把当前筛选下能动手的项全部选中；受保护项始终不进来。
     pub fn select_all_visible(&mut self) -> usize {
         let visible = self.visible_items();
         let Some(r) = &self.result else {
@@ -925,7 +775,7 @@ impl AppState {
         };
         for i in visible {
             let c = &r.items[i];
-            if self.priority_of(c).selectable() {
+            if Self::item_actionable(c) {
                 self.checked.insert(c.path.display().to_string());
             }
         }
@@ -983,6 +833,12 @@ impl AppState {
         let from_cache = result.from_cache;
         self.result = Some(result);
         self.scanned_now = !from_cache;
+        if !from_cache {
+            // 真扫完就把时刻落在这里。以前这一步只在界面层做，
+            // 任何绕过界面直接塞结果的路径都会留下「有结果却没有时刻」，
+            // 摘要于是写「尚未扫描」而下面列着一屏条目。
+            self.last_scan_at = Some(crate::paths::now_hhmm());
+        }
         if from_cache {
             self.checked.clear();
             self.pending_clean = None;
@@ -1006,15 +862,19 @@ impl AppState {
     /// 扫完了、有内容，但一项都不能动。
     pub fn only_protected(&self) -> bool {
         match &self.result {
-            Some(r) if !r.items.is_empty() => {
-                !r.items.iter().any(|c| self.priority_of(c).selectable())
-            }
+            Some(r) if !r.items.is_empty() => !r.items.iter().any(Self::item_actionable),
             _ => false,
         }
     }
 
     pub fn toggle(&mut self, path: &str) {
-        if !self.can_select() {
+        if !self.can_select()
+            || !self.result.as_ref().is_some_and(|r| {
+                r.items
+                    .iter()
+                    .any(|c| c.path.display().to_string() == path && Self::item_actionable(c))
+            })
+        {
             return;
         }
         let key = path.to_string();
@@ -1026,6 +886,118 @@ impl AppState {
 
     pub fn is_checked(&self, path: &str) -> bool {
         self.checked.contains(path)
+    }
+
+    /// 当前可见行里属于某一档的那些序号。
+    ///
+    /// 分组标题上的三态框和该组的行必须看同一批数据——否则筛选后
+    /// 标题会报告「全选」而页面上并没有那些行。
+    pub fn group_rows(&self, pr: Priority) -> Vec<usize> {
+        let Some(r) = &self.result else {
+            return Vec::new();
+        };
+        self.visible_items()
+            .into_iter()
+            .filter(|&i| self.priority_of(&r.items[i]) == pr)
+            .collect()
+    }
+
+    /// 一组的勾选状态：全选 / 部分 / 未选 / 不可选。
+    pub fn group_check(&self, pr: Priority) -> crate::components::checkbox::TriState {
+        use crate::components::checkbox::TriState;
+        let Some(r) = &self.result else {
+            return TriState::Unchecked;
+        };
+        let rows: Vec<_> = self
+            .group_rows(pr)
+            .into_iter()
+            .filter(|&i| Self::item_actionable(&r.items[i]))
+            .collect();
+        if rows.is_empty() {
+            return TriState::Locked;
+        }
+        let checked = rows
+            .iter()
+            .filter(|&&i| self.is_checked(&r.items[i].path.display().to_string()))
+            .count();
+        if checked == 0 {
+            TriState::Unchecked
+        } else if checked == rows.len() {
+            TriState::Checked
+        } else {
+            TriState::Partial
+        }
+    }
+
+    /// 整组勾上或清掉，只动这一档的行。
+    ///
+    /// 已全选时再点一下清空该组；否则全部勾上。**不碰其他组**——
+    /// 用户在「建议清掉」里点头，不该把「可以直接清」里取消过的项又勾回来。
+    ///
+    /// 返回 (组内项数, 变更后是否全选)。
+    pub fn toggle_group(&mut self, pr: Priority) -> (usize, bool) {
+        if !self.can_select() {
+            return (0, false);
+        }
+        let Some(r) = &self.result else {
+            return (0, false);
+        };
+        let rows = self.group_rows(pr);
+        let keys: Vec<String> = rows
+            .iter()
+            .filter(|&&i| Self::item_actionable(&r.items[i]))
+            .map(|&i| r.items[i].path.display().to_string())
+            .collect();
+        if keys.is_empty() {
+            return (0, false);
+        }
+        let n = keys.len();
+        let all_on = keys.iter().all(|k| self.checked.contains(k));
+        for k in keys {
+            if all_on {
+                self.checked.remove(&k);
+            } else {
+                self.checked.insert(k);
+            }
+        }
+        self.pending_clean = None;
+        (n, !all_on)
+    }
+
+    /// 展开或收起某个项目/工具子组，不改勾选和清理批次。
+    pub fn toggle_subgroup_open(&mut self, pr: Priority, key: String) {
+        if !self.collapsed_groups.remove(&(pr, key.clone())) {
+            self.collapsed_groups.insert((pr, key));
+        }
+    }
+
+    /// 子组选择只接纳当前筛选下、属于该优先级且本来可选的路径。
+    /// 已全选则取消本组，否则补齐本组；其他项目和搜索外条目保持原样。
+    pub fn toggle_subgroup_selection(&mut self, pr: Priority, paths: &[String]) {
+        if !self.can_select() || paths.is_empty() {
+            return;
+        }
+        let Some(r) = &self.result else { return };
+        let requested: HashSet<&str> = paths.iter().map(String::as_str).collect();
+        let keys: Vec<String> = self
+            .group_rows(pr)
+            .into_iter()
+            .filter(|&i| Self::item_actionable(&r.items[i]))
+            .map(|i| r.items[i].path.display().to_string())
+            .filter(|path| requested.contains(path.as_str()))
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        let all_on = keys.iter().all(|key| self.checked.contains(key));
+        for key in keys {
+            if all_on {
+                self.checked.remove(&key);
+            } else {
+                self.checked.insert(key);
+            }
+        }
+        self.pending_clean = None;
     }
 
     pub fn checked_bytes(&self) -> u64 {
@@ -1066,7 +1038,7 @@ impl AppState {
         let items: Vec<PendingItem> = r
             .items
             .iter()
-            .filter(|c| self.is_checked(&c.path.display().to_string()))
+            .filter(|c| Self::item_actionable(c) && self.is_checked(&c.path.display().to_string()))
             .map(|c| PendingItem {
                 path: c.path.clone(),
                 bytes: c.alloc_bytes.max(c.bytes),
@@ -1109,6 +1081,20 @@ impl AppState {
             .filter(|r| r.restorable && self.quarantine_checked.contains(&r.id))
             .map(|r| r.bytes)
             .sum()
+    }
+
+    /// 已移入临时空间且内容仍存在的数量与体积；未载入或读取失败时没有数字。
+    pub fn pending_release(&self) -> Option<(usize, u64)> {
+        if self.quarantine_loading || self.quarantine_error.is_some() {
+            return None;
+        }
+        let mut count = 0;
+        let mut bytes: u64 = 0;
+        for item in self.quarantine.iter().filter(|item| item.restorable) {
+            count += 1;
+            bytes = bytes.saturating_add(item.bytes);
+        }
+        Some((count, bytes))
     }
 
     pub fn select_all_quarantine(&mut self) {
@@ -1167,8 +1153,11 @@ impl AppState {
                     Filter::Cleanable => {
                         matches!(pr, Priority::Suggested | Priority::Safe)
                     }
-                    Filter::Recent => pr == Priority::Suggested,
-                    Filter::Suggested => pr == Priority::Suggested,
+                    // 「久未使用」按 `suggest_clean` 判：这是扫描器实测闲置
+                    // 天数越过规则阈值后置上的标记。以前这一档和「建议清掉」
+                    // 共用一条判据（都是 `Priority::Suggested`），标签写着久未
+                    // 使用、点进去却混着 AI 判过可以动的条目，两边含义对不上。
+                    Filter::Recent => c.suggest_clean,
                     Filter::Reclaimable => pr == Priority::Safe,
                     Filter::Costly => pr == Priority::Costly,
                     Filter::Protected => pr == Priority::Keep,
@@ -1233,6 +1222,18 @@ impl AppState {
             }
         }
         (n, bytes)
+    }
+
+    /// 「久未使用」这一档的条数。
+    ///
+    /// 与 `visible_items` 的 `Filter::Recent` 同源（都看 `suggest_clean`），
+    /// 这样标签上的数字和点进去看到的行数永远一致。不要拿 `summary_of` 的
+    /// 某一档来顶替：`Priority::Suggested` 还含 AI 判过可以动的条目。
+    pub fn suggest_clean_count(&self) -> usize {
+        self.result
+            .as_ref()
+            .map(|r| r.items.iter().filter(|c| c.suggest_clean).count())
+            .unwrap_or(0)
     }
 
     /// 「现在就能清」的那一批：建议清理 + 可回收。首页的大数字只讲这一个量。
@@ -1307,6 +1308,53 @@ mod tests {
         assert_eq!(r.items[vis[0]].path.to_str(), Some("/p/target"));
     }
 
+    /// 「久未使用」这一档只能收 `suggest_clean` 的条目。
+    ///
+    /// 以前它和「建议清掉」共用同一条判据（`Priority::Suggested`），于是
+    /// 标签写着「久未使用」、点进去却混着 AI 判过可以动的条目：用户点进来
+    /// 想找「放了很久没动的东西」，看到的却是另一批。这里同时守住两件事——
+    /// 筛选只认 `suggest_clean`，标签上的数字也必须是同一个口径数出来的。
+    #[test]
+    fn recent_filter_only_counts_actually_stale_items() {
+        // /old 是真·久未使用：规则 stale_days 越过阈值后由扫描器置标记。
+        let mut old = cand("/old", 900, costly());
+        old.suggest_clean = true;
+        // /ai 是「建议清掉」但不是因为久未使用——AI 说可以动。
+        let ai = cand("/ai", 800, costly());
+        // /fresh 有代价且没人说可以动：不该出现在任何「建议」里。
+        let fresh = cand("/fresh", 700, costly());
+        let mut s = state_with(vec![old, ai, fresh]);
+        s.ai.safe.insert("/ai".into(), true);
+
+        assert_eq!(
+            s.priority_of(&s.result.as_ref().unwrap().items[1]),
+            Priority::Suggested,
+            "前提：AI 判过可以动的有代价项确实落在「建议清掉」这一档"
+        );
+
+        s.filter = Filter::Recent;
+        let paths: Vec<String> = s
+            .visible_items()
+            .iter()
+            .map(|&i| {
+                s.result.as_ref().unwrap().items[i]
+                    .path
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["/old"],
+            "「久未使用」只该列出真的闲置很久的条目"
+        );
+        assert_eq!(
+            s.suggest_clean_count(),
+            paths.len(),
+            "标签上的数字必须与点进去看到的行数一致"
+        );
+    }
+
     #[test]
     fn protected_items_are_hidden_by_default() {
         // 「建议保留」单独一档，默认列表里不混进来——否则用户会对着
@@ -1370,6 +1418,39 @@ mod tests {
     }
 
     #[test]
+    fn group_selection_tracks_partial_state_and_only_changes_visible_actionable_rows() {
+        use crate::components::checkbox::TriState;
+        let mut s = state_with(vec![
+            cand("/a", 100, Verdict::Reclaimable),
+            cand("/b", 200, Verdict::Reclaimable),
+            cand(
+                "/k",
+                300,
+                Verdict::Protected {
+                    reason: ProtectReason::UserRecord,
+                },
+            ),
+        ]);
+        s.clear_selection();
+        s.toggle("/a");
+        assert_eq!(s.group_check(Priority::Safe), TriState::Partial);
+        assert_eq!(s.toggle_group(Priority::Safe), (2, true));
+        assert_eq!(s.group_check(Priority::Safe), TriState::Checked);
+        assert_eq!(s.toggle_group(Priority::Safe), (2, false));
+        assert_eq!(s.group_check(Priority::Safe), TriState::Unchecked);
+
+        s.query = "/b".into();
+        assert_eq!(s.toggle_group(Priority::Safe), (1, true));
+        assert!(!s.is_checked("/a"));
+        assert!(s.is_checked("/b"));
+        s.query.clear();
+        s.filter = Filter::Protected;
+        assert_eq!(s.group_check(Priority::Keep), TriState::Locked);
+        assert_eq!(s.toggle_group(Priority::Keep), (0, false));
+        assert!(!s.is_checked("/k"));
+    }
+
+    #[test]
     fn select_reclaimable_skips_costly_items() {
         let mut s = state_with(vec![
             cand("/a", 100, Verdict::Reclaimable),
@@ -1422,12 +1503,26 @@ mod tests {
         assert!(s.is_checked("/a"), "清理期间不应该能改变勾选");
     }
 
+    /// 占住「正在还原」这个活动位：临时目录里建一个空审计库，不碰真实 home。
+    fn occupy_restore(s: &mut AppState) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("molt-state-restore-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let store = molt_act::AuditStore::open(&dir.join("audit.db")).expect("建审计库");
+        let q = molt_act::Quarantine::new(dir.join("q"), "restore");
+        s.restore_job = Some(crate::worker::RestoreJob::start(Vec::new(), store, q));
+    }
+
     #[test]
     fn activity_is_exclusive() {
         let mut s = AppState::new("/Users/me".into());
         assert_eq!(s.activity(), Activity::Idle);
         assert!(s.can_start());
-        s.restoring = Some(1);
+        occupy_restore(&mut s);
         assert_eq!(s.activity(), Activity::Restoring);
         assert!(!s.can_start(), "有动作在跑时不能再开新动作");
     }

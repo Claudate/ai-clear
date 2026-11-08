@@ -18,6 +18,7 @@ pub mod paths;
 pub mod schedule;
 pub mod state;
 pub mod theme;
+pub mod treemap;
 pub mod widgets;
 pub mod worker;
 

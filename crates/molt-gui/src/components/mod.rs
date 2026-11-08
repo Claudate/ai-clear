@@ -12,12 +12,10 @@
 pub mod banner;
 pub mod checkbox;
 pub mod confirm_dialog;
-pub mod create_window;
+pub mod occupancy_map;
 pub mod status_bar;
 pub mod time;
-pub mod tools_menu;
 
 pub use confirm_dialog::{ConfirmDialog, ConfirmKind, ConfirmOutcome};
-pub use create_window::{CreateOutcome, CreateProps, CreateWindow};
+pub use occupancy_map::{occupancy_map, Block};
 pub use status_bar::{StatusBar, StatusBarOutcome, StatusTone};
-pub use tools_menu::{ToolGroup, ToolId, ToolState, ToolsMenu, ToolsMenuProps, GROUPS};

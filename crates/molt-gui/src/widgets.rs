@@ -11,7 +11,7 @@ use crate::icons;
 use crate::state::StatusKind;
 use crate::theme::{Palette, RADIUS_CARD, RADIUS_CONTROL, RADIUS_PILL};
 
-/// 一张卡片。整个界面的内容都装在这种白底圆角块里。
+/// 有边界的摘要与状态信息使用同一款圆角面板。
 ///
 /// 卡片自带 1 像素描边而不是靠阴影：egui 的阴影在深色模式下几乎看不见，
 /// 而描边两侧都能读清「这里到那里是一块」。
@@ -32,14 +32,14 @@ pub fn plain_section<R>(ui: &mut egui::Ui, p: &Palette, add: impl FnOnce(&mut eg
             add(ui)
         })
         .inner;
-    ui.add_space(p.sz(14.0));
+    ui.add_space(p.sz(18.0));
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
     ui.painter().hline(
         rect.x_range(),
         rect.center().y,
         egui::Stroke::new(1.0, p.row_separator),
     );
-    ui.add_space(p.sz(14.0));
+    ui.add_space(p.sz(18.0));
     out
 }
 
@@ -91,6 +91,14 @@ pub fn page_header(
             right(ui);
         });
     });
+    ui.add_space(p.sz(10.0));
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0, p.row_separator),
+    );
 }
 
 /// 一个统计块：大数字 + 小标签。
@@ -165,6 +173,9 @@ pub fn chip(ui: &mut egui::Ui, p: &Palette, text: &str, selected: bool) -> bool 
     let pad = egui::vec2(p.sz(10.0), p.sz(5.0));
     let size = galley.size() + pad * 2.0;
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::RadioButton, ui.is_enabled(), selected, text)
+    });
     let hovered = resp.hovered();
 
     ui.painter().rect(
@@ -454,12 +465,15 @@ pub fn secondary_button(ui: &mut egui::Ui, p: &Palette, text: &str, enabled: boo
     let btn = egui::Button::new(
         egui::RichText::new(text)
             .size(p.sz(12.5))
-            .color(if enabled { p.text } else { p.text_faint }),
+            .color(if enabled { p.reclaimable } else { p.text_faint }),
     )
     .corner_radius(egui::CornerRadius::same(RADIUS_CONTROL))
     .min_size(egui::vec2(0.0, p.sz(30.0)))
-    .fill(egui::Color32::TRANSPARENT)
-    .stroke(egui::Stroke::new(1.0, p.border_strong));
+    .fill(p.surface)
+    .stroke(egui::Stroke::new(
+        1.0,
+        if enabled { p.reclaimable } else { p.border },
+    ));
     ui.add_enabled(enabled, btn).clicked()
 }
 
@@ -589,13 +603,13 @@ pub fn segmented(ui: &mut egui::Ui, p: &Palette, options: &[(&str, bool)]) -> Op
                     // 光靠 2 点间距时，「可回收 90」与「有代价 210」会读成一串数字。
                     let text = egui::RichText::new(*label)
                         .size(p.sz(12.0))
-                        .color(if *selected { p.text } else { p.text_dim });
+                        .color(if *selected { p.on_accent() } else { p.text_dim });
                     let mut btn = egui::Button::new(text)
                         .frame(false)
                         .corner_radius(egui::CornerRadius::same(RADIUS_PILL))
                         .min_size(egui::vec2(0.0, p.sz(26.0)));
                     btn = if *selected {
-                        btn.fill(p.surface)
+                        btn.fill(p.reclaimable)
                     } else {
                         btn.fill(p.surface_alt.gamma_multiply(0.6))
                     };
@@ -656,17 +670,24 @@ pub fn busy_bar(ui: &mut egui::Ui, p: &Palette, width: f32) {
         .request_repaint_after(std::time::Duration::from_millis(40));
 }
 
-/// 确定性进度条。
-pub fn progress_bar(ui: &mut egui::Ui, p: &Palette, frac: f32, width: f32, label: &str) {
-    let h = p.sz(6.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
-    let r = egui::CornerRadius::same(3);
+/// 确定性进度条；薄条和临期状态由调用方传入高度与颜色。
+pub fn progress_bar(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    frac: f32,
+    width: f32,
+    label: &str,
+    height: f32,
+    fill_color: egui::Color32,
+) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let r = egui::CornerRadius::same(if height <= p.sz(3.0) { 2 } else { 3 });
     ui.painter().rect_filled(rect, r, p.surface_alt);
     let f = frac.clamp(0.0, 1.0);
     if f > 0.0 {
         let filled =
-            egui::Rect::from_min_size(rect.min, egui::vec2((rect.width() * f).max(3.0), h));
-        ui.painter().rect_filled(filled, r, p.reclaimable);
+            egui::Rect::from_min_size(rect.min, egui::vec2((rect.width() * f).max(3.0), height));
+        ui.painter().rect_filled(filled, r, fill_color);
     }
     if !label.is_empty() {
         ui.add_space(6.0);
@@ -923,11 +944,15 @@ pub fn nav_icon(
     ui: &mut egui::Ui,
     p: &Palette,
     icon: NavIcon,
+    title: &str,
     selected: bool,
     badge: Option<&str>,
 ) -> egui::Response {
     let side = p.sz(34.0);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Tab, ui.is_enabled(), selected, title)
+    });
     let color = if selected { p.reclaimable } else { p.text_dim };
     if selected {
         ui.painter().rect_filled(
@@ -946,6 +971,14 @@ pub fn nav_icon(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     draw_nav_icon(ui.painter(), p, icon, rect.center(), color);
+    if resp.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            egui::CornerRadius::same(RADIUS_CONTROL),
+            egui::Stroke::new(2.0, p.focus),
+            egui::StrokeKind::Inside,
+        );
+    }
 
     // 角标：有东西 / 某个开关开着，不点进去也看得见。
     //
@@ -1020,7 +1053,7 @@ fn draw_nav_icon(
     // 图标库里七枚是同一套粗细与圆角，排在一起才像一套东西——
     // 而这一行正是全窗口最常被扫过的一行。
     let glyph = match icon {
-        NavIcon::Gauge => icons::GAUGE,
+        NavIcon::Gauge => icons::BROOM,
         NavIcon::Archive => icons::ARCHIVE_TRAY,
         NavIcon::Box => icons::CUBE,
         NavIcon::Clock => icons::CLOCK,
@@ -1050,7 +1083,34 @@ pub fn section_header(
     bytes: u64,
     tint: egui::Color32,
 ) {
+    let _ = section_header_checkable(ui, p, title, hint, count, bytes, tint, None, "");
+}
+
+/// 带三态框的分节标题。返回是否点了那个框。
+///
+/// 框单独占一格、排在标题左边：它管的是「这一整组」，与右边那些数字不是一个
+/// 层次；把框塞进行尾会被读成「把标题带进选择」。
+#[allow(clippy::too_many_arguments)]
+pub fn section_header_checkable(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    title: &str,
+    hint: &str,
+    count: usize,
+    bytes: u64,
+    tint: egui::Color32,
+    check: Option<(crate::components::checkbox::TriState, bool)>,
+    name: &str,
+) -> bool {
+    let mut clicked = false;
     ui.horizontal(|ui| {
+        if let Some((state, interactive)) = check {
+            let resp = crate::components::checkbox::tri_state(ui, p, state, interactive, name);
+            clicked = resp.clicked();
+            if interactive && resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+        }
         let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, p.sz(16.0)), egui::Sense::hover());
         ui.painter()
             .rect_filled(rect, egui::CornerRadius::same(2), tint);
@@ -1084,6 +1144,81 @@ pub fn section_header(
         });
     });
     ui.add_space(4.0);
+    clicked
+}
+
+/// 优先级之下的项目/工具分组标题。返回 (展开切换, 勾选切换)。
+///
+/// 折叠和选择分开：看某个项目的条目不能顺手改变待清理批次。
+#[allow(clippy::too_many_arguments)]
+pub fn subgroup_header(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    title: &str,
+    count: usize,
+    bytes: u64,
+    expanded: bool,
+    selection: crate::components::checkbox::TriState,
+    interactive: bool,
+) -> (bool, bool) {
+    let mut toggle_open = false;
+    let mut toggle_selection = false;
+    ui.horizontal(|ui| {
+        ui.add_space(p.sz(12.0));
+        let arrow = ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new(if expanded { "▾" } else { "▸" })
+                        .size(p.sz(13.0))
+                        .color(p.text_dim),
+                )
+                .frame(false)
+                .min_size(egui::vec2(p.sz(26.0), p.sz(26.0))),
+            )
+            .accessible_name(format!(
+                "{title}，{}",
+                if expanded { "收起" } else { "展开" }
+            ));
+        toggle_open |= arrow.clicked();
+        let check = crate::components::checkbox::tri_state(
+            ui,
+            p,
+            selection,
+            interactive,
+            &format!(
+                "{title}，{} 项，{}",
+                count,
+                match selection {
+                    crate::components::checkbox::TriState::Checked => "已全选",
+                    crate::components::checkbox::TriState::Partial => "部分选中",
+                    crate::components::checkbox::TriState::Locked => "不可选",
+                    crate::components::checkbox::TriState::Unchecked => "未选中",
+                }
+            ),
+        );
+        toggle_selection = check.clicked();
+        toggle_open |= ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new(title)
+                        .size(p.sz(11.5))
+                        .strong()
+                        .color(p.text),
+                )
+                .frame(false),
+            )
+            .clicked();
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!("{count} 项 · {}", molt_scan::human_bytes(bytes)))
+                    .size(p.sz(10.0))
+                    .color(p.text_dim),
+            )
+            .wrap_mode(egui::TextWrapMode::Extend),
+        );
+    });
+    ui.add_space(p.sz(2.0));
+    (toggle_open, toggle_selection)
 }
 
 /// AI 对一条数据的解释。前面带一个「AI」小标记，与本地判定区分开——
@@ -1123,9 +1258,12 @@ pub fn sidebar_item(
     selected: bool,
     badge: Option<&str>,
 ) -> egui::Response {
-    let h = p.sz(30.0);
+    let h = p.sz(35.0);
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Tab, ui.is_enabled(), selected, title)
+    });
     if selected {
         ui.painter().rect_filled(
             rect,
@@ -1145,7 +1283,7 @@ pub fn sidebar_item(
     let color = if selected { p.reclaimable } else { p.text_dim };
     let center = rect.left_center() + egui::vec2(p.sz(18.0), 0.0);
     draw_nav_icon(ui.painter(), p, icon, center, color);
-    let text_color = if selected { p.text } else { p.text_dim };
+    let text_color = if selected { p.reclaimable } else { p.text };
     ui.painter().text(
         rect.left_center() + egui::vec2(p.sz(32.0), 0.0),
         egui::Align2::LEFT_CENTER,
@@ -1153,6 +1291,14 @@ pub fn sidebar_item(
         egui::FontId::proportional(p.sz(12.5)),
         text_color,
     );
+    if resp.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            egui::CornerRadius::same(RADIUS_CONTROL),
+            egui::Stroke::new(2.0, p.focus),
+            egui::StrokeKind::Inside,
+        );
+    }
     // 角标：贴在条目右沿，数字与「开着」的圆点两种形态与顶栏一致。
     if let Some(b) = badge {
         let painter = ui.painter();
@@ -1190,8 +1336,10 @@ pub fn summary_strip(
     ui: &mut egui::Ui,
     p: &Palette,
     used_ratio: f32,
+    clean_ratio: Option<f32>,
     available: &str,
     cleanable: Option<(&str, usize)>,
+    pending_release: (&str, egui::Color32),
     scanning: bool,
     can_start: bool,
     activity: &str,
@@ -1213,11 +1361,22 @@ pub fn summary_strip(
                     ui.painter().rect_filled(rect, r, p.surface_alt);
                     let f = used_ratio.clamp(0.0, 1.0);
                     if f > 0.0 {
-                        let filled = egui::Rect::from_min_size(
-                            rect.min,
-                            egui::vec2((rect.width() * f).max(3.0), rect.height()),
-                        );
+                        let used_w = (rect.width() * f).max(3.0).min(rect.width());
+                        let filled =
+                            egui::Rect::from_min_size(rect.min, egui::vec2(used_w, rect.height()));
                         ui.painter().rect_filled(filled, r, p.used_bar);
+                        if let Some(fraction) = clean_ratio.filter(|fraction| *fraction > 0.0) {
+                            let clean_w = (rect.width() * fraction).max(3.0).min(used_w);
+                            let segment = egui::Rect::from_min_size(
+                                egui::pos2(rect.left() + used_w - clean_w, rect.top()),
+                                egui::vec2(clean_w, rect.height()),
+                            );
+                            ui.painter().rect_filled(
+                                segment,
+                                egui::CornerRadius::same(2),
+                                p.reclaimable,
+                            );
+                        }
                     }
                 },
             );
@@ -1271,6 +1430,30 @@ pub fn summary_strip(
                 }
             });
         });
+        ui.add_space(p.sz(6.0));
+        let mut line = egui::text::LayoutJob::default();
+        let font = egui::FontId::proportional(p.sz(10.5));
+        if cleanable.is_some() {
+            line.append(
+                "移入临时空间：可还原、空间不变    永久删除：立即释放、不可恢复    ",
+                0.0,
+                egui::TextFormat {
+                    font_id: font.clone(),
+                    color: p.text_dim,
+                    ..Default::default()
+                },
+            );
+        }
+        line.append(
+            pending_release.0,
+            0.0,
+            egui::TextFormat {
+                font_id: font,
+                color: pending_release.1,
+                ..Default::default()
+            },
+        );
+        ui.add(egui::Label::new(line).wrap_mode(egui::TextWrapMode::Wrap));
     });
     rescan
 }
@@ -1285,13 +1468,10 @@ pub fn why_text(ui: &mut egui::Ui, p: &Palette, text: &str, color: egui::Color32
     );
 }
 
-/// 右侧详情抽屉。只读：摆一行放不下的完整信息，动作仍留在清单与底栏。
+/// 右侧详情抽屉。展示完整记录与已有的 AI 解释，不在这里执行清理。
 ///
-/// 用 `Area` 钉在内容区右沿，不是弹窗——弹窗会挡住清单，而用户看详情时
-/// 常常还要对照着勾别的行。Esc 或点外面关闭。
-///
-/// `rows` 是 (标签, 值) 对，值的展示色由调用方定则太多，这里统一次要色、
-/// 让判定色只出现在「判定」那一行（它由 `verdict` 单独给）。
+/// 用 `Area` 钉在窗口右侧，左侧清单仍可操作；访达入口固定在底栏，Esc 可关闭。
+/// `rows` 是调用方传入的真实 (标签, 值) 对，窄窗时信息区独立滚动。
 #[allow(clippy::too_many_arguments)]
 pub fn detail_drawer(
     ctx: &egui::Context,
@@ -1304,15 +1484,15 @@ pub fn detail_drawer(
 ) -> DetailDrawerOutcome {
     let mut out = DetailDrawerOutcome::None;
     let screen = ctx.content_rect();
-    let w = p.sz(300.0).min(screen.width() - p.sz(40.0));
-    // 离窗口边缘留一点：贴边会读成一条栏，浮起来才像「简介」。
-    let m = p.sz(8.0);
+    let w = p
+        .sz(410.0)
+        .min((screen.width() * 0.54).max(p.sz(250.0)))
+        .min(screen.width());
     let rect = egui::Rect::from_min_max(
-        egui::pos2(screen.right() - w - m, screen.top() + m),
-        egui::pos2(screen.right() - m, screen.bottom() - m),
+        egui::pos2(screen.right() - w, screen.top()),
+        screen.right_bottom(),
     );
-    // 不铺暗化层、不拦截点击：用户看简介时常常还要对照着勾别的行、
-    // 或者直接按底栏执行。暗化层会把整张清单的点击全吃掉。关闭靠叉号与 Esc。
+    // 不铺暗化层：抽屉打开后仍可对照左侧清单和修改勾选。
     egui::Area::new(egui::Id::unique("detail-drawer"))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
@@ -1320,50 +1500,153 @@ pub fn detail_drawer(
             egui::Frame::NONE
                 .fill(p.surface)
                 .stroke(egui::Stroke::new(1.0, p.border))
-                .inner_margin(egui::Margin::symmetric(18, 16))
+                .corner_radius(egui::CornerRadius {
+                    nw: 18,
+                    sw: 18,
+                    ..Default::default()
+                })
+                .inner_margin(egui::Margin::symmetric(22, 20))
                 .show(ui, |ui| {
-                    ui.set_width(w - 36.0);
-                    ui.set_max_height(rect.height() - 32.0);
+                    let inner_w = w - 44.0;
+                    ui.set_width(inner_w);
+                    ui.set_min_height(rect.height() - 40.0);
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(title).size(p.sz(15.0)).strong())
-                                .wrap_mode(egui::TextWrapMode::Truncate),
+                        let (icon_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(p.sz(56.0), p.sz(56.0)),
+                            egui::Sense::hover(),
                         );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if close_button(ui, p, "关闭") {
+                        ui.painter().rect_filled(
+                            icon_rect,
+                            egui::CornerRadius::same(12),
+                            p.accent_soft,
+                        );
+                        ui.painter().text(
+                            icon_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            icons::CUBE,
+                            icons::font(p.sz(32.0)),
+                            p.reclaimable,
+                        );
+                        ui.add_space(p.sz(8.0));
+                        ui.vertical(|ui| {
+                            ui.set_width((inner_w - p.sz(124.0)).max(p.sz(80.0)));
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(title)
+                                        .size(p.sz(17.0))
+                                        .strong()
+                                        .color(p.text),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Truncate),
+                            );
+                            ui.add_space(p.sz(5.0));
+                            badge(ui, p, verdict.0, verdict.1, verdict.2);
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                            if close_button(ui, p, "关闭详情") {
                                 out = DetailDrawerOutcome::Close;
                             }
                         });
                     });
-                    ui.add_space(p.sz(6.0));
-                    badge(ui, p, verdict.0, verdict.1, verdict.2);
-                    ui.add_space(p.sz(10.0));
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for (k, v) in rows {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(k).size(p.sz(10.5)).color(p.text_faint),
-                                )
-                                .wrap_mode(egui::TextWrapMode::Extend),
-                            );
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(v).size(p.sz(12.0)).color(p.text_dim),
-                                )
-                                .wrap_mode(egui::TextWrapMode::Wrap),
-                            );
-                            ui.add_space(p.sz(8.0));
-                        }
-                        if let Some(n) = note {
-                            hairline(ui, p);
-                            ui.add_space(p.sz(4.0));
-                            ai_note(ui, p, n);
-                        }
-                        if can_reveal {
-                            ui.add_space(p.sz(10.0));
-                            if secondary_button(ui, p, "在访达中显示", true) {
-                                out = DetailDrawerOutcome::Reveal;
+                    ui.add_space(p.sz(18.0));
+                    ui.separator();
+                    ui.add_space(p.sz(12.0));
+
+                    // 信息区可滚动，操作栏始终贴底；窄窗与大字号不会截断路径。
+                    let info_h = (rect.height() - p.sz(190.0)).max(p.sz(80.0));
+                    egui::ScrollArea::vertical()
+                        .max_height(info_h)
+                        .show(ui, |ui| {
+                            for (k, v) in rows {
+                                ui.horizontal_top(|ui| {
+                                    let (label_rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(p.sz(130.0), p.sz(22.0)),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().text(
+                                        label_rect.left_center(),
+                                        egui::Align2::LEFT_CENTER,
+                                        k,
+                                        egui::FontId::proportional(p.sz(11.5)),
+                                        p.text_dim,
+                                    );
+                                    if k == "本次勾选状态" {
+                                        let checked = v == "已勾选";
+                                        let (check_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(p.sz(14.0), p.sz(14.0)),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().rect(
+                                            check_rect,
+                                            egui::CornerRadius::same(4),
+                                            if checked { p.reclaimable } else { p.surface },
+                                            egui::Stroke::new(
+                                                1.0,
+                                                if checked { p.reclaimable } else { p.border },
+                                            ),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                        if checked {
+                                            ui.painter().text(
+                                                check_rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "✓",
+                                                egui::FontId::proportional(p.sz(12.0)),
+                                                p.on_accent(),
+                                            );
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(v).size(p.sz(12.5)).color(p.text),
+                                        );
+                                    } else {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(v)
+                                                    .size(p.sz(12.5))
+                                                    .color(p.text),
+                                            )
+                                            .wrap_mode(egui::TextWrapMode::Wrap),
+                                        );
+                                    }
+                                });
+                                ui.add_space(p.sz(13.0));
                             }
+                            if let Some(n) = note.filter(|n| !n.trim().is_empty()) {
+                                ui.add_space(p.sz(8.0));
+                                egui::Frame::NONE
+                                    .fill(p.accent_soft)
+                                    .stroke(egui::Stroke::new(1.0, p.border))
+                                    .corner_radius(egui::CornerRadius::same(12))
+                                    .inner_margin(egui::Margin::same(14))
+                                    .show(ui, |ui| {
+                                        ui.set_width(inner_w - p.sz(28.0));
+                                        ui.label(
+                                            egui::RichText::new("AI 解释")
+                                                .size(p.sz(11.5))
+                                                .strong()
+                                                .color(p.reclaimable),
+                                        );
+                                        ui.add_space(p.sz(6.0));
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(n)
+                                                    .size(p.sz(12.0))
+                                                    .color(p.text),
+                                            )
+                                            .wrap_mode(egui::TextWrapMode::Wrap),
+                                        );
+                                    });
+                            }
+                        });
+                    let used = ui.cursor().top() - ui.min_rect().top();
+                    let remaining = rect.height() - p.sz(40.0) - used - p.sz(58.0);
+                    ui.add_space(remaining.max(0.0));
+                    ui.separator();
+                    ui.add_space(p.sz(8.0));
+                    // 底栏只放执行入口；关闭由标题栏那个叉负责，避免同一屏两个「关闭详情」。
+                    ui.horizontal(|ui| {
+                        if can_reveal && secondary_button(ui, p, "在访达中显示", true) {
+                            out = DetailDrawerOutcome::Reveal;
                         }
                     });
                 });

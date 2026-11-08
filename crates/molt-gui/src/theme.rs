@@ -73,6 +73,12 @@ pub struct Palette {
     pub danger: egui::Color32,
     /// 危险的浅底
     pub danger_soft: egui::Color32,
+    /// 键盘焦点描边；浅色与深色都要清晰可辨。
+    pub focus: egui::Color32,
+    /// 危险实心按钮上的文字。
+    pub on_danger: egui::Color32,
+    /// 对话框后方的遮罩。
+    pub scrim: egui::Color32,
     /// 字号缩放比例。1.0 为标准档。
     ///
     /// 放在调色板里而不是单独传给每个函数：界面里每一处字号都要乘它，
@@ -82,32 +88,35 @@ pub struct Palette {
 }
 
 /// 圆角尺度。三条就够：卡片、控件、小标记。
-pub const RADIUS_CARD: u8 = 14;
+pub const RADIUS_CARD: u8 = 12;
 pub const RADIUS_CONTROL: u8 = 9;
 pub const RADIUS_PILL: u8 = 6;
 
 impl Palette {
     pub fn light() -> Self {
         Self {
-            bg: egui::Color32::from_rgb(244, 247, 252),
-            sidebar_bg: egui::Color32::from_rgb(233, 239, 247),
-            row_separator: egui::Color32::from_rgb(212, 221, 234),
+            bg: egui::Color32::from_rgb(255, 255, 255),
+            sidebar_bg: egui::Color32::from_rgb(249, 250, 253),
+            row_separator: egui::Color32::from_rgb(225, 229, 237),
             surface: egui::Color32::from_rgb(255, 255, 255),
-            surface_alt: egui::Color32::from_rgb(236, 242, 250),
-            surface_hover: egui::Color32::from_rgb(242, 246, 252),
-            text: egui::Color32::from_rgb(18, 27, 40),
-            text_dim: egui::Color32::from_rgb(92, 106, 128),
-            text_faint: egui::Color32::from_rgb(140, 153, 173),
-            border: egui::Color32::from_rgb(219, 228, 241),
-            border_strong: egui::Color32::from_rgb(194, 208, 227),
-            reclaimable: egui::Color32::from_rgb(21, 101, 216),
-            accent_soft: egui::Color32::from_rgb(228, 238, 253),
-            costly: egui::Color32::from_rgb(158, 92, 16),
-            costly_soft: egui::Color32::from_rgb(250, 241, 228),
-            protected: egui::Color32::from_rgb(139, 146, 152),
-            used_bar: egui::Color32::from_rgb(126, 143, 168),
+            surface_alt: egui::Color32::from_rgb(245, 247, 251),
+            surface_hover: egui::Color32::from_rgb(242, 246, 253),
+            text: egui::Color32::from_rgb(27, 34, 46),
+            text_dim: egui::Color32::from_rgb(77, 86, 103),
+            text_faint: egui::Color32::from_rgb(94, 103, 120),
+            border: egui::Color32::from_rgb(222, 227, 237),
+            border_strong: egui::Color32::from_rgb(195, 205, 222),
+            reclaimable: egui::Color32::from_rgb(24, 103, 226),
+            accent_soft: egui::Color32::from_rgb(224, 235, 255),
+            costly: egui::Color32::from_rgb(163, 94, 48),
+            costly_soft: egui::Color32::from_rgb(250, 239, 229),
+            protected: egui::Color32::from_rgb(99, 105, 111),
+            used_bar: egui::Color32::from_rgb(146, 156, 172),
             danger: egui::Color32::from_rgb(179, 54, 46),
             danger_soft: egui::Color32::from_rgb(251, 236, 234),
+            focus: egui::Color32::from_rgb(21, 101, 216),
+            on_danger: egui::Color32::WHITE,
+            scrim: egui::Color32::from_black_alpha(128),
             scale: 1.0,
         }
     }
@@ -122,7 +131,7 @@ impl Palette {
             surface_hover: egui::Color32::from_rgb(26, 36, 48),
             text: egui::Color32::from_rgb(234, 241, 250),
             text_dim: egui::Color32::from_rgb(154, 168, 190),
-            text_faint: egui::Color32::from_rgb(116, 132, 155),
+            text_faint: egui::Color32::from_rgb(123, 139, 162),
             border: egui::Color32::from_rgb(37, 49, 65),
             border_strong: egui::Color32::from_rgb(54, 69, 90),
             reclaimable: egui::Color32::from_rgb(101, 163, 255),
@@ -133,6 +142,9 @@ impl Palette {
             used_bar: egui::Color32::from_rgb(110, 128, 153),
             danger: egui::Color32::from_rgb(240, 124, 114),
             danger_soft: egui::Color32::from_rgb(49, 30, 28),
+            focus: egui::Color32::from_rgb(125, 183, 255),
+            on_danger: egui::Color32::from_rgb(13, 19, 28),
+            scrim: egui::Color32::from_black_alpha(170),
             scale: 1.0,
         }
     }
@@ -189,7 +201,7 @@ impl Palette {
 pub struct Theme {
     pub mode: Mode,
     pub palette: Palette,
-    /// 字号缩放。固定走 [`Theme::DEFAULT_SCALE`]（大字号）。
+    /// 字号缩放。默认使用大字号，也可在设置页切换。
     pub scale: f32,
     /// 是否跟随系统外观。
     ///
@@ -200,11 +212,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// 唯一档位：**大字号**。
-    ///
-    /// 字号切换（标准字号/放大字号）已按用户要求移除，界面固定用这一档。
-    /// 这款工具的门槛恰恰是「一眼看清这一项是什么、删了会怎样」，
-    /// 所以字号直接落在大字号，不给用户切小的入口。
+    /// 默认使用大字号；设置页仍可按个人需要切换。
     pub const DEFAULT_SCALE: f32 = 1.4;
 
     /// 安装主题并返回当前状态。两套样式都装，之后跟随系统切换。
@@ -221,6 +229,27 @@ impl Theme {
         // 跟随系统外观，而不是锁死其中一个
         ctx.set_theme(egui::ThemePreference::System);
         t
+    }
+
+    /// 重新应用深浅两套文本与控件尺寸，避免重复缩放已有样式。
+    pub fn set_scale(&mut self, ctx: &egui::Context, scale: f32) {
+        if (self.scale - scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.scale = scale;
+        self.palette = Palette::of(self.mode).with_scale(scale);
+        self.apply_all(ctx);
+        ctx.request_repaint();
+    }
+
+    /// 三段控件的档位，非法索引不改变当前设置。
+    pub fn scale_for_index(index: u8) -> Option<f32> {
+        match index {
+            0 => Some(Self::DEFAULT_SCALE),
+            1 => Some(1.2),
+            2 => Some(1.0),
+            _ => None,
+        }
     }
 
     fn apply_all(&self, ctx: &egui::Context) {
@@ -296,6 +325,7 @@ fn apply(style: &mut egui::Style, p: Palette, theme: egui::Theme) {
     style.visuals.selection.bg_fill = p.accent_soft;
     style.visuals.selection.stroke.color = p.reclaimable;
     style.visuals.hyperlink_color = p.reclaimable;
+    style.visuals.widgets.active.fg_stroke.color = p.focus;
 
     // 文本样式每次从默认值重建再乘缩放，而不是在现有值上继续乘——
     // `style_mut_of` 改的是持久样式，累乘会让来回切两档之后字号越变越大、回不去。
@@ -408,6 +438,48 @@ mod tests {
                 + (p.reclaimable.g() as i32 - on.g() as i32).abs()
                 + (p.reclaimable.b() as i32 - on.b() as i32).abs();
             assert!(diff > 180, "主按钮文字与底色对比不足：{diff}");
+        }
+    }
+
+    #[test]
+    fn foreground_tokens_meet_normal_text_contrast() {
+        fn luminance(color: egui::Color32) -> f32 {
+            let channel = |v: u8| {
+                let x = f32::from(v) / 255.0;
+                if x <= 0.04045 {
+                    x / 12.92
+                } else {
+                    ((x + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+        }
+        fn ratio(a: egui::Color32, b: egui::Color32) -> f32 {
+            let (hi, lo) = (
+                luminance(a).max(luminance(b)),
+                luminance(a).min(luminance(b)),
+            );
+            (hi + 0.05) / (lo + 0.05)
+        }
+        for p in [Palette::light(), Palette::dark()] {
+            for foreground in [
+                p.text,
+                p.text_dim,
+                p.text_faint,
+                p.reclaimable,
+                p.costly,
+                p.danger,
+                p.protected,
+            ] {
+                assert!(
+                    ratio(foreground, p.surface) >= 4.5,
+                    "foreground {foreground:?} on surface {:?} has ratio {}",
+                    p.surface,
+                    ratio(foreground, p.surface)
+                );
+            }
+            assert!(ratio(p.on_danger, p.danger) >= 4.5);
+            assert!(ratio(p.on_accent(), p.reclaimable) >= 4.5);
         }
     }
 

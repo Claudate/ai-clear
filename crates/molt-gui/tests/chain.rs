@@ -9,26 +9,14 @@
 //!
 //! 破坏性流程只在假 home 里做（`MOLT_HOME`），碰不到真实缓存。
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use molt_core::{Candidate, ItemKind, Verdict};
 use molt_gui::state::{Activity, AppState, Priority, StatusKind};
-
-fn tmp_home(tag: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!(
-        "molt-chain-{}-{}-{}",
-        std::process::id(),
-        tag,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p
-}
 
 fn make_dir_with_file(path: &Path, name: &str, bytes: usize) {
     std::fs::create_dir_all(path).unwrap();
@@ -54,7 +42,7 @@ fn apply(state: &mut AppState, items: Vec<Candidate>) {
 /// 整个进程只有一个测试：改 `MOLT_HOME` 是进程级的，并行会互相污染。
 #[test]
 fn scan_ai_clean_schedule_feedback_chain() {
-    let home = tmp_home("chain");
+    let home = common::tmp_home("chain");
     std::env::set_var("MOLT_HOME", &home);
     let home_str = home.to_string_lossy().to_string();
 
@@ -329,6 +317,17 @@ fn scan_ai_clean_schedule_feedback_chain() {
         .expect("定时清理移走的 npm 缓存应当还在隔离区里");
     let id = row.id;
     molt_gui::pages::quarantine::restore(&mut state, id);
+    // 还原是后台任务（大目录解压会把窗口冻住，所以不能同步做）。
+    // 这里把主循环里那一步搬过来：一直 pump，直到任务记录消失。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while state.restore_job.is_some() && std::time::Instant::now() < deadline {
+        molt_gui::pages::quarantine::pump_restore(&mut state);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        state.restore_job.is_none(),
+        "还原任务必须在超时前跑完，否则用户会一直看到「正在还原」"
+    );
     assert!(cache.exists(), "定时清理走的是可还原路径，必须能拿回来");
 
     // ---- 6. 设置页填密钥：落盘、收紧权限、立刻生效（不用重启） ----

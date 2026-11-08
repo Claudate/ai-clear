@@ -108,6 +108,12 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Act
                 )
                 .wrap_mode(egui::TextWrapMode::Wrap),
             );
+            ui.add_space(8.0);
+            // 文案已经指明了去哪，那就把这条路做成能点的：让用户读完还得
+            // 自己回左侧导航找一遍，等于把一句话变成一次操作负担。
+            if secondary_button(ui, p, "去临时空间", true) {
+                acts.push(Action::GoPage(crate::state::Page::Quarantine));
+            }
         });
     });
     ui.add_space(10.0);
@@ -176,6 +182,10 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Act
 
     egui::ScrollArea::vertical()
         .max_height(list_h)
+        // 滚动位置必须跟着筛选走：不加这个 salt 时，从「全部 200 条」滚到中间
+        // 再切到「已还原 2 条」，滚动偏移会原样留着，列表在那一档里已经被
+        // clamp 到顶，用户看到的是凭空多出来的一片空白。
+        .id_salt(("history-list", state.history_filter))
         .auto_shrink([false, false])
         .show_rows(ui, row_h, total, |ui, range| {
             // 行距清零：时间线靠一条细线分隔，行高本身已经是留白。

@@ -7,7 +7,6 @@
 //! 有副作用，因此「界面点了会发生什么」在别处是可推演的。
 
 use eframe::egui;
-use std::sync::Arc;
 
 use crate::action::{self, Action, Effect};
 use crate::components::{StatusBar, StatusBarOutcome, StatusTone};
@@ -25,10 +24,18 @@ impl MoltApp {
     /// 用当前系统环境构造一个可以直接跑的窗口。
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::theme::install_fonts(&cc.egui_ctx);
-        let theme = crate::theme::Theme::install(&cc.egui_ctx);
+        let mut theme = crate::theme::Theme::install(&cc.egui_ctx);
+        let saved_scale = cc
+            .storage
+            .and_then(|storage| storage.get_string("cleanling.font_scale"))
+            .and_then(|text| text.parse::<f32>().ok())
+            .filter(|scale| [1.0, 1.2, crate::theme::Theme::DEFAULT_SCALE].contains(scale))
+            .unwrap_or(crate::theme::Theme::DEFAULT_SCALE);
+        theme.set_scale(&cc.egui_ctx, saved_scale);
 
         let home = crate::paths::home_dir().to_string_lossy().to_string();
         let mut state = AppState::new(home.clone());
+        state.display_scale = saved_scale;
 
         match molt_rules::load(&home, Some(&molt_act::paths::user_rules_dir())) {
             Ok(r) => state.rules = Some(r),
@@ -37,18 +44,41 @@ impl MoltApp {
 
         state.refresh_disk();
 
+        // 先排空到期项，再读最终状态：首页待释放量与临时空间须同一口径。
+        crate::pages::quarantine::purge_due_on_start(&mut state);
         crate::pages::history::reload(&mut state);
         crate::pages::quarantine::reload(&mut state);
-        // 启动时排空已到期的隔离项
-        crate::pages::quarantine::purge_due_on_start(&mut state);
 
         let leftovers = molt_act::paths::legacy_leftovers();
         if !leftovers.is_empty() {
-            state.status = Some(StatusMessage::warn(format!(
+            // 两条都是启动时该说的。以前这里直接给 status 赋值，把上面
+            // `purge_due_on_start` 刚写的「排空了 N 项、释放 X」整条盖掉——
+            // 用户永远不知道启动时有过一次删除，这在清理工具里是致命的。
+            // 有排空在先就把迁移提示接在后面，一条都别丢。
+            let migration = format!(
                 "检测到旧版本数据 {} 项尚未迁移（位于 app.shou）。\
                  系统拒绝了自动搬运，请把该目录内容手动移到 app.molt 下。",
                 leftovers.len()
-            )));
+            );
+            state.status = Some(match state.status.take() {
+                Some(prev) => StatusMessage::info(format!("{} {}", prev.text, migration)),
+                None => StatusMessage::warn(migration),
+            });
+        }
+
+        // 定时清理配了却不会跑，是这一版最安静的一种故障：配置写着
+        // `enabled = true`，自动清理页上也写着「已启用」，唯独 launchd 里
+        // 没有这个任务——到点什么都不发生，也没有任何提示。以前这条状态只在
+        // 用户主动进「自动清理」页时才查一次，可一个定时任务坏掉之后，人恰恰
+        // 最不会再去打开那一页。
+        //
+        // 启动时静默查一次（不装不卸、不写任何东西），发现「说启用了、系统里
+        // 却没加载」就在首页直接说，并指向能修它的那一页。
+        if let Some(text) = crate::schedule::startup_health_warning() {
+            state.status = Some(match state.status.take() {
+                Some(prev) => StatusMessage::warn(format!("{} {text}", prev.text)),
+                None => StatusMessage::warn(text),
+            });
         }
 
         // 先用上次存下的结果铺一屏，再在后台扫。
@@ -95,7 +125,7 @@ impl MoltApp {
         });
         let mut theme = crate::theme::Theme::install(ctx);
         theme.mode = mode;
-        theme.palette = crate::theme::Palette::of(mode);
+        theme.palette = crate::theme::Palette::of(mode).with_scale(theme.scale);
         theme.follow_system = false;
         crate::theme::reinstall(ctx, &theme);
         Self {
@@ -128,8 +158,10 @@ impl MoltApp {
     /// 画一帧。
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         self.theme.sync_system(ui.ctx());
+        self.theme.set_scale(ui.ctx(), self.state.display_scale);
         self.pump(ui.ctx());
-        self.tick_clean_anim(ui.ctx());
+        self.tick_clean_completion(ui.ctx());
+        self.navigation_shortcuts(ui.ctx());
 
         let p = self.theme.palette;
         // 侧栏先占位：面板按占位顺序分配空间，内容区拿剩下的宽度。
@@ -141,7 +173,7 @@ impl MoltApp {
             .frame(
                 egui::Frame::NONE
                     .fill(p.bg)
-                    .inner_margin(egui::Margin::symmetric(28, 18)),
+                    .inner_margin(egui::Margin::symmetric(22, 18)),
             )
             .show(ui, |ui| {
                 // 内容自适应窗口宽度：宽窗口下卡片/列表要撑满可用宽度，
@@ -179,18 +211,6 @@ impl MoltApp {
                                     &mut acts,
                                 );
                             }
-                            Page::Uninstall => {
-                                crate::pages::uninstall::show(ui, &self.state, &p, &mut acts);
-                                // 右键「卸载」装出来的批次要在这里弹确认框。
-                                // 别处（工作台）只挂自己的那一份，卸载页以前一条都没挂——
-                                // 于是点完卸载什么也不发生，用户以为按钮坏了。
-                                crate::pages::uninstall::confirm_modal(
-                                    ui,
-                                    &self.state,
-                                    &p,
-                                    &mut acts,
-                                );
-                            }
                             Page::History => {
                                 crate::pages::history::show(ui, &self.state, &p, &mut acts)
                             }
@@ -200,81 +220,13 @@ impl MoltApp {
                             Page::Settings => {
                                 crate::pages::settings::show(ui, &self.state, &p, &mut acts)
                             }
-                            Page::Tools => {
-                                crate::pages::tools::show(ui, &self.state, &p, &mut acts)
-                            }
                         }
                         self.actions.append(&mut acts);
                     },
                 );
             });
 
-        // 新建窗口画在所有面板之上。放在这里而不是某页里：它不属于任何一页，
-        // 而且浮窗不该被页面切换带走。
-        self.create_window(ui.ctx());
-
-        // 帧末统一执行。放在最后，这一帧里读到的状态在一次绘制中是稳定的。
         self.dispatch();
-    }
-
-    /// 新建窗口。窗口本身是组件（props 进、outcome 出），这里只做「把状态装成
-    /// props、把 outcome 翻成 Action」这一段。
-    fn create_window(&mut self, ctx: &egui::Context) {
-        if !self.state.create.open {
-            return;
-        }
-        let p = self.theme.palette;
-        let plan = self.state.create.plan(&self.state.home);
-        let blocked = self.state.activity();
-        let outcome = {
-            let props = crate::components::CreateProps {
-                root: &self.state.create.root,
-                lines: &self.state.create.lines,
-                tab: self.state.create.tab,
-                plan: &plan,
-                last: self.state.create.last.as_ref(),
-                error: self.state.create.error.as_deref(),
-                can_run: !blocked.is_busy(),
-                blocked_hint: blocked.blocking_hint(),
-            };
-            crate::components::CreateWindow::show(ctx, &p, props)
-        };
-        use crate::components::CreateOutcome as O;
-        match outcome {
-            O::None => {}
-            O::Close => self.actions.push(Action::CloseCreate),
-            O::SetRoot(s) => self.actions.push(Action::SetCreateRoot(s)),
-            O::SetLines(s) => self.actions.push(Action::SetCreateLines(s)),
-            O::SetTab(t) => self.actions.push(Action::SetCreateTab(t)),
-            O::Run => self.actions.push(Action::RunCreate),
-            O::Undo => self.actions.push(Action::UndoCreate),
-            O::PickRoot => self.pick_create_root(),
-        }
-    }
-
-    /// 开系统目录选择框，把选中的目录写回「建在哪」。
-    ///
-    /// 为什么在这一层调而不是在组件里：`rfd` 的阻塞 API 会跑一个自己的
-    /// 模态 runloop，画帧途中直接调会把那一帧卡在那里。放到动作分发之后，
-    /// 本帧已经画完，用户看到的是完整的窗口加一个系统选择框。
-    /// 取消选择（返回 `None`）什么都不改——用户只是想看看，不该把已填的路径清掉。
-    fn pick_create_root(&mut self) {
-        let start = if self.state.create.root.is_empty() {
-            crate::paths::home_dir()
-        } else {
-            std::path::PathBuf::from(&self.state.create.root)
-        };
-        let picked = rfd::FileDialog::new()
-            .set_title("建在哪个目录")
-            .set_directory(&start)
-            .pick_folder();
-        if let Some(dir) = picked {
-            let mut s = dir.to_string_lossy().to_string();
-            if !s.ends_with('/') {
-                s.push('/');
-            }
-            self.actions.push(Action::SetCreateRoot(s));
-        }
     }
 
     /// 把这一帧攒下的动作全部落到状态上，并执行它们要求的副作用。
@@ -315,6 +267,7 @@ impl MoltApp {
             Effect::ReloadQuarantine => crate::pages::quarantine::reload(&mut self.state),
             Effect::ReloadHistory => crate::pages::history::reload(&mut self.state),
             Effect::ReloadAiConfig => self.state.ai.reload_config(),
+            Effect::ReloadRules => crate::pages::settings::reload_rules(&mut self.state),
             Effect::SaveAiConfig => crate::pages::settings::save_ai_config(&mut self.state),
             Effect::SaveApiKey => crate::pages::settings::save_api_key(&mut self.state),
             Effect::EnsureAutoLoaded => crate::pages::automation::ensure_loaded(&mut self.state),
@@ -324,41 +277,18 @@ impl MoltApp {
             Effect::RunScheduledNow => crate::pages::automation::run_now(&mut self.state),
             Effect::RefreshDisk => self.state.refresh_disk(),
             Effect::CollectExpired => crate::pages::quarantine::purge_due_on_start(&mut self.state),
-            Effect::ScanApps => {
-                self.state.app_scan_job =
-                    Some(crate::worker::AppScanJob::start(self.state.home.clone()))
-            }
-            Effect::ScanLeftovers(path) => {
-                // 残留盘点要 bundle id / CFBundleName 才能认出数据目录，
-                // 而界面上那行只有展示字段，所以从本体路径把 Info.plist 再读一遍。
-                match molt_act::uninstall::entry_at(std::path::Path::new(&path)) {
-                    Some(entry) => {
-                        self.state.leftover_job = Some(crate::worker::LeftoverJob::start(
-                            entry,
-                            self.state.home.clone(),
-                        ))
-                    }
-                    None => {
-                        // 找不到本体（刚被卸掉、或刚重扫过）：别留一个永远转的
-                        // 「正在找残留…」，直接把这次展开标成扫过了。
-                        self.state.uninstall.leftovers_loading = None;
-                        if let Some(row) = self
-                            .state
-                            .uninstall
-                            .apps
-                            .iter_mut()
-                            .find(|a| a.path == path)
-                        {
-                            row.leftovers_loaded = true;
-                        }
-                    }
+            Effect::RevealInFinder(path) => {
+                // `-R` 是在访达里**选中**它，不是打开它：用户想看看这个路径
+                // 在哪、旁边还有什么，不该因此把它启动起来。
+                if let Err(e) = std::process::Command::new("open")
+                    .arg("-R")
+                    .arg(&path)
+                    .spawn()
+                {
+                    self.state.status = Some(crate::state::StatusMessage::error(format!(
+                        "没能打开 {path} 所在的目录：{e}"
+                    )));
                 }
-            }
-            Effect::Uninstall(pending) => {
-                // 卸载与清理共用隔离模式与执行器，但**入口不能共用**：
-                // `start_clean` 会拿首页扫描结果的勾选再过滤一遍，应用本体与残留
-                // 都在那份清单之外，于是批次永远被清空。卸错了同样能在临时空间还原。
-                crate::pages::workbench::start_uninstall(&mut self.state, &pending)
             }
             Effect::RevealQuarantine => {
                 // 目录可能还不存在（一次都没清理过）：先建出来再打开，
@@ -376,111 +306,73 @@ impl MoltApp {
                     )));
                 }
             }
-            Effect::LaunchApp(path) => {
-                // `open` 有多个参数时会把它们当成同一个应用的多份文档；
-                // 这里只传一个路径，让系统按它自己的规则启动。
-                if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
-                    self.state.status = Some(crate::state::StatusMessage::error(format!(
-                        "没能启动 {path}：{e}"
-                    )));
+            Effect::ScanDuplicates => {
+                // 重复文件检测是只读的后台任务：只展示与定位，绝不删除。
+                if self.state.duplicate_job.is_none() {
+                    self.state.duplicate_job =
+                        Some(crate::worker::DuplicateJob::start(self.state.home.clone()));
                 }
             }
-            Effect::RevealApp(path) => {
-                // `-R` 是在访达里**选中**它，不是打开它：用户想看看这个应用
-                // 装在哪、旁边还有什么，不该因此把它启动起来。
-                if let Err(e) = std::process::Command::new("open")
-                    .arg("-R")
-                    .arg(&path)
+            Effect::CopyPath(path) => {
+                // macOS 专属：pbcopy 写入系统剪贴板。失败要给出可见原因。
+                let mut child = match std::process::Command::new("pbcopy")
+                    .stdin(std::process::Stdio::piped())
                     .spawn()
                 {
-                    self.state.status = Some(crate::state::StatusMessage::error(format!(
-                        "没能打开 {path} 所在的目录：{e}"
-                    )));
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.state.status = Some(crate::state::StatusMessage::error(format!(
+                            "复制路径失败：{e}"
+                        )));
+                        return;
+                    }
+                };
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    if let Err(e) = stdin.write_all(path.as_bytes()) {
+                        self.state.status = Some(crate::state::StatusMessage::error(format!(
+                            "复制路径失败：{e}"
+                        )));
+                        return;
+                    }
+                }
+                match child.wait() {
+                    Ok(status) if status.success() => {
+                        // 空字符串会画出一条什么字都没有的提示条：用户点完
+                        // 「复制路径」看不到任何回应，以为没生效。
+                        self.state.status =
+                            Some(crate::state::StatusMessage::info("路径已复制到剪贴板"));
+                    }
+                    Ok(status) => {
+                        self.state.status = Some(crate::state::StatusMessage::error(format!(
+                            "复制路径失败（退出码 {}）",
+                            status.code().unwrap_or(-1)
+                        )));
+                    }
+                    Err(e) => {
+                        self.state.status = Some(crate::state::StatusMessage::error(format!(
+                            "复制路径失败：{e}"
+                        )));
+                    }
                 }
             }
-            Effect::Create(plan) => self.start_create(&plan),
-            Effect::UndoCreate(batch) => self.run_undo_create(&batch),
         }
     }
 
-    /// 落盘一批新建。创建是一项写操作，但它是「加法」、且每一项都预先校验过
-    /// （已存在则跳过、根目录外一律拒绝），所以它不进隔离区。
-    fn start_create(&mut self, plan: &molt_act::CreatePlan) {
-        let store = match molt_act::AuditStore::open(&crate::paths::audit_db()) {
-            Ok(s) => s,
-            Err(e) => {
-                self.state.create.error = Some(format!("审计库打不开：{e}"));
-                return;
-            }
-        };
-        let batch = format!("create-{}", molt_act::now_iso8601());
-        let report = plan.execute(&store, &batch);
-        let st = &mut self.state;
-        st.status = Some(if report.has_problems() {
-            crate::state::StatusMessage::warn(format!("新建：{}", report.summary()))
-        } else {
-            crate::state::StatusMessage::info(format!("新建：{}", report.summary()))
-        });
-        st.create.error = None;
-        st.create.last = Some(report);
-    }
-
-    /// 撤销最近一次新建。只删「还保持原样」的东西，见 `molt_act::create::undo_batch`。
-    fn run_undo_create(&mut self, batch: &str) {
-        let store = match molt_act::AuditStore::open(&crate::paths::audit_db()) {
-            Ok(s) => s,
-            Err(e) => {
-                self.state.create.error = Some(format!("审计库打不开：{e}"));
-                return;
-            }
-        };
-        match molt_act::create::undo_batch(batch, &store, &self.state.home) {
-            Ok(rep) => {
-                self.state.status = Some(if rep.skipped.is_empty() {
-                    crate::state::StatusMessage::info(format!("撤销：{}", rep.summary()))
-                } else {
-                    crate::state::StatusMessage::warn(format!("撤销：{}", rep.summary()))
-                });
-                self.state.create.last = None;
-            }
-            Err(e) => self.state.create.error = Some(e),
-        }
-    }
-
-    /// 推进首页圆环的清理动画。
-    ///
-    /// 真实清理进度拿不到逐项回调（执行器是一次性跑完的），所以这里用
-    /// 「按下确认 → 收尾」这段真实时长驱动一条逐渐逼近 92% 的进度：
-    /// 它不会提前跑满然后卡住，也不会假装比真实更快。收尾那一刻直接跑满、
-    /// 满蓝停留 1.8 秒再回到磁盘读数——「清完了」与「清到一半」在环上完全不同。
-    fn tick_clean_anim(&mut self, ctx: &egui::Context) {
+    /// 清理完成后将结果保留片刻；运行中的百分比只由执行器回调更新。
+    fn tick_clean_completion(&mut self, ctx: &egui::Context) {
         let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1);
         let running = self.state.is_cleaning();
         let st = &mut self.state;
-        if running {
-            // 渐近：每帧补上剩余差距的一小部分，越接近越慢。
-            // 停在 92% 而不是 100%——剩下那一段留给真正结束的那一刻。
-            let gap = 0.92 - st.clean_anim;
-            if gap > 0.0 {
-                st.clean_anim += gap * (dt * 2.2).min(1.0);
-            }
-            st.clean_done_secs = 0.0;
-        } else if st.clean_done_secs > 0.0 {
+        if !running && st.clean_done_secs > 0.0 {
             st.clean_done_secs = (st.clean_done_secs - dt).max(0.0);
-            st.clean_anim = 1.0;
-            if st.clean_done_secs <= 0.0 {
-                // 庆祝结束：环回到磁盘读数
-                st.clean_anim = 0.0;
-            }
-        } else if st.clean_was_running && st.clean_anim > 0.0 {
-            // 上一帧还在清、这一帧不在了，也没有结果：被中断或失败了。
-            // 直接把弧收回去，不做淡出——残留的弧会被读成「还在清」。
+            st.clean_anim = if st.clean_done_secs > 0.0 { 1.0 } else { 0.0 };
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        } else if !running && st.clean_was_running {
+            // 被中断或失败时没有完成报告，清掉残留进度。
             st.clean_anim = 0.0;
         }
         st.clean_was_running = running;
-        if st.clean_anim > 0.0 || st.clean_done_secs > 0.0 {
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        }
     }
 
     /// 每帧推进所有后台任务。后台结果回填不属于 `Action`：
@@ -489,16 +381,52 @@ impl MoltApp {
         crate::pages::workbench::pump_scan(&mut self.state);
         crate::pages::workbench::pump_clean(&mut self.state);
         crate::pages::workbench::pump_ai(&mut self.state);
+        crate::pages::workbench::pump_duplicates(&mut self.state);
         crate::pages::quarantine::pump_purge(&mut self.state);
         crate::pages::quarantine::pump_restore(&mut self.state);
         crate::pages::automation::pump(&mut self.state);
-        pump_app_scan(&mut self.state);
-        pump_leftover_job(&mut self.state);
-        crate::pages::uninstall::pump_done(&mut self.state);
 
         // 有任何动作在跑就持续重绘：否则进度条与「正在请求模型…」会停住
         if self.state.is_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        }
+    }
+
+    /// 通过已有动作处理 macOS 键盘导航，避免快捷键绕开扫描的忙碌守卫。
+    fn navigation_shortcuts(&mut self, ctx: &egui::Context) {
+        let shortcut = ctx.input(|input| {
+            input.events.iter().find_map(|event| {
+                let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = event
+                else {
+                    return None;
+                };
+                if !modifiers.command {
+                    return None;
+                }
+                let page_keys = [
+                    egui::Key::Num1,
+                    egui::Key::Num2,
+                    egui::Key::Num3,
+                    egui::Key::Num4,
+                    egui::Key::Num5,
+                ];
+                if let Some(index) = page_keys.iter().position(|candidate| candidate == key) {
+                    return Some(Action::GoPage(Page::ALL[index]));
+                }
+                match key {
+                    egui::Key::Comma => Some(Action::GoPage(Page::Settings)),
+                    egui::Key::R => Some(Action::FollowNextStep(crate::state::NextStep::Retry)),
+                    _ => None,
+                }
+            })
+        });
+        if let Some(action) = shortcut {
+            self.actions.push(action);
         }
     }
 
@@ -515,16 +443,15 @@ impl MoltApp {
         let state = &self.state;
         let mut acts = Vec::new();
         // 断点看整窗宽度：此时内容区还没占位，`available_width` 就是窗口宽。
-        // 780 = 侧栏 196 + 内容区至少要留的 580 左右，再窄就收图标——
-        // 760 点的窗口配 196 点侧栏时，首页那排按钮已经被裁到边上了。
-        let compact = ui.available_width() < p.sz(780.0);
-        let w = if compact { p.sz(56.0) } else { p.sz(196.0) };
+        // 按参考图保留约五分之一窗口给导航；窄窗收成图标列，保证操作区足够宽。
+        let compact = ui.available_width() < p.sz(700.0);
+        let w = if compact { p.sz(56.0) } else { p.sz(158.0) };
         // 窄档里图标乘完缩放后约 48 点，侧栏内再留 4 点边距：56 - 8 ≈ 48。
         let side_pad = if compact { p.sz(4.0) } else { p.sz(12.0) };
         egui::Panel::left("sidebar")
             .resizable(false)
-            // 侧栏与内容区靠底色深浅分开，不加那道竖线。
-            .show_separator_line(false)
+            // 图中侧栏与白色内容区由一条极细的冷灰线划分。
+            .show_separator_line(true)
             .exact_size(w)
             .frame(
                 egui::Frame::NONE
@@ -532,79 +459,66 @@ impl MoltApp {
                     .inner_margin(egui::Margin {
                         left: side_pad as i8,
                         right: side_pad as i8,
-                        top: p.sz(14.0) as i8,
+                        top: p.sz(22.0) as i8,
                         bottom: p.sz(12.0) as i8,
                     }),
             )
             .show(ui, |ui| {
-                // ---- 品牌：logo 常显，名称只在宽档里带字 ----
+                // 品牌块与设置图一致：使用应用现有的蓝色图标，名称置于下方。
                 if let Some(tex) = crate::brand::texture(ui.ctx()) {
-                    let h = crate::brand::BAR_LOGO_HEIGHT * p.scale;
-                    let sz = tex.size_vec2();
-                    let lw = h * sz.x / sz.y;
-                    let indent = if compact {
-                        ((ui.available_width() - lw) / 2.0).max(0.0)
-                    } else {
-                        0.0
-                    };
-                    ui.horizontal(|ui| {
-                        ui.add_space(indent);
+                    ui.vertical_centered(|ui| {
+                        let h = p.sz(if compact { 34.0 } else { 50.0 });
                         ui.add(
                             egui::Image::from_texture(egui::load::SizedTexture::new(
                                 tex.id(),
-                                egui::vec2(lw, h),
+                                egui::vec2(h, h),
                             ))
-                            .fit_to_exact_size(egui::vec2(lw, h)),
+                            .fit_to_exact_size(egui::vec2(h, h)),
                         );
                         if !compact {
-                            ui.add_space(p.sz(8.0));
+                            ui.add_space(p.sz(7.0));
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new("净灵 · Cleanling")
-                                        .size(p.sz(15.0))
-                                        .strong(),
+                                        .size(p.sz(12.5))
+                                        .strong()
+                                        .color(p.text),
                                 )
-                                .wrap_mode(egui::TextWrapMode::Truncate),
+                                .wrap_mode(egui::TextWrapMode::Extend),
                             );
                         }
                     });
                 }
-                ui.add_space(p.sz(18.0));
+                ui.add_space(p.sz(if compact { 16.0 } else { 26.0 }));
 
-                // ---- 导航：组间留白，组内按 `NAV_GROUPS` 顺序 ----
-                // 侧栏分组不用标题：三组本来就是「清理 / 应用与记录 / 设置」，
-                // 给每组再加一行假标题只会多一层要读的字。
-                for (gi, group) in Page::NAV_GROUPS.iter().enumerate() {
-                    if gi > 0 {
-                        ui.add_space(p.sz(14.0));
-                    }
-                    for page in group.iter() {
-                        let badge = badge_for(state, *page);
-                        if compact {
-                            let resp = crate::widgets::nav_icon(
-                                ui,
-                                &p,
-                                page.icon(),
-                                state.page == *page,
-                                badge.as_deref(),
-                            );
-                            if resp.on_hover_text(page.title()).clicked() {
-                                acts.push(Action::GoPage(*page));
-                            }
-                        } else {
-                            let resp = crate::widgets::sidebar_item(
-                                ui,
-                                &p,
-                                page.icon(),
-                                page.title(),
-                                state.page == *page,
-                                badge.as_deref(),
-                            );
-                            if resp.clicked() {
-                                acts.push(Action::GoPage(*page));
-                            }
-                            ui.add_space(p.sz(2.0));
+                // 所有导航行从同一轴线开始、间距一致。
+                for page in Page::ALL {
+                    let badge = badge_for(state, page);
+                    if compact {
+                        let resp = crate::widgets::nav_icon(
+                            ui,
+                            &p,
+                            page.icon(),
+                            page.title(),
+                            state.page == page,
+                            badge.as_deref(),
+                        );
+                        if resp.on_hover_text(page.title()).clicked() {
+                            acts.push(Action::GoPage(page));
                         }
+                    } else {
+                        let resp = crate::widgets::sidebar_item(
+                            ui,
+                            &p,
+                            page.icon(),
+                            page.title(),
+                            state.page == page,
+                            badge.as_deref(),
+                        );
+                        if resp.clicked() {
+                            acts.push(Action::GoPage(page));
+                        }
+                        ui.add_space(p.sz(4.0));
                     }
                 }
             });
@@ -694,6 +608,10 @@ pub fn apply_report_action(state: &mut AppState, action: crate::widgets::ReportA
 }
 
 impl eframe::App for MoltApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string("cleanling.font_scale", self.state.display_scale.to_string());
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
     }
@@ -715,147 +633,6 @@ fn badge_for(state: &AppState, page: Page) -> Option<String> {
         }
         Page::Automation if state.auto.config.enabled => Some(String::new()),
         _ => None,
-    }
-}
-
-/// 把应用列举任务的结果回填进状态。
-///
-/// 和别的 pump 不同，这个函数**还要顺带把界面的展示结构建出来**
-/// （`AppRow` 带着已格式化的路径与残留行）。这一步是纯映射，
-/// 放在这里而不是页面里，是为了让页面只读现成数据、不做格式化决策。
-fn pump_app_scan(state: &mut AppState) {
-    use crate::worker::AppScanProgress as P;
-
-    let mut listed: Option<(Vec<molt_act::AppEntry>, Vec<String>)> = None;
-    let mut measured: Vec<(String, u64)> = Vec::new();
-    let mut finished: Option<Arc<crate::worker::AppScanResult>> = None;
-
-    // `poll` 只保留最新一条，所以这里自己把这一帧积攒的消息全取出来：
-    // 体积是逐条到的，丢掉任何一条都会有一个格子的体积停在 0。
-    let mut drained = Vec::new();
-    if let Some(job) = state.app_scan_job.as_mut() {
-        drained = job.drain();
-    }
-    for p in drained {
-        match p {
-            P::Listed { apps, scanned_dirs } => listed = Some((apps, scanned_dirs)),
-            P::Measured { path, bytes } => measured.push((path, bytes)),
-            P::Done(res) => finished = Some(res),
-        }
-    }
-    if state.app_scan_job.as_ref().is_some_and(|j| j.is_finished()) {
-        state.app_scan_job = None;
-    }
-
-    // 第一段：清单立刻铺出来。体积先写 0，页面会显示成「正在量…」而不是 0 B。
-    if let Some((apps, dirs)) = listed {
-        let st = &mut state.uninstall;
-        st.apps = apps
-            .iter()
-            .map(|a| crate::state::AppRow {
-                name: a.name.clone(),
-                path: a.path.display().to_string(),
-                bundle_id: a.bundle_id.clone(),
-                bytes: 0,
-                bytes_known: false,
-                leftovers: Vec::new(),
-                leftover_bytes: 0,
-                icon_file: a.icon_file.clone(),
-                leftovers_loaded: false,
-            })
-            .collect();
-        st.scanned_dirs = dirs;
-        // 清单已经出来了：这里必须把 loading 放开，否则页面仍然显示
-        // 「正在列出应用…」，用户还是看不到东西——那正是这次要修的那件事。
-        st.loading = false;
-        st.listed_at = Some(std::time::SystemTime::now());
-        st.error = None;
-    }
-
-    // 第二段：体积逐条填进去。按路径认，不按位置——并行量完的顺序是随机的。
-    if !measured.is_empty() {
-        let st = &mut state.uninstall;
-        for (path, bytes) in measured {
-            if let Some(row) = st.apps.iter_mut().find(|a| a.path == path) {
-                row.bytes = bytes;
-                row.bytes_known = true;
-            }
-        }
-    }
-
-    let Some(res) = finished else {
-        return;
-    };
-
-    // 这一轮**只**更新体积/顺序/扫描目录。残留一律不碰：
-    // 它由 `LeftoverJob` 在用户点开某个应用时单独扫，理由见 worker.rs。
-    // 所以已经加载过的残留要原样留住，否则体积量完会把它抹掉。
-    let st = &mut state.uninstall;
-    for app in &res.apps {
-        let key = app.path.display().to_string();
-        if let Some(row) = st.apps.iter_mut().find(|a| a.path == key) {
-            row.bytes = app.bytes;
-            // 终局是权威值：这一轮量过的就是量过了，`bytes == 0` 也算数
-            // （真的很小、或那次没量出来）。别再让它回到「正在量…」。
-            row.bytes_known = true;
-        }
-    }
-    // 按体积重排，与后台给的顺序一致——用户想卸的是占地方的那个。
-    st.apps.sort_by_key(|a| std::cmp::Reverse(a.bytes));
-    st.scanned_dirs = res.scanned_dirs.clone();
-    st.loading = false;
-    st.listed_at = Some(std::time::SystemTime::now());
-    st.error = None;
-    // 展开的那个应用如果已经不在列表里（刚被卸掉、或重扫后消失），就收起
-    if let Some(open) = st.open.clone() {
-        if !st.apps.iter().any(|a| a.path == open) {
-            st.open = None;
-        }
-    }
-}
-
-/// 收点开某个应用时启动的残留盘点。
-///
-/// 结果回来要核对目标：用户可能已经收起、又点开了另一个应用，
-/// 这时手里这份就属于上一个应用，不能塞进当前展开的详情里。
-fn pump_leftover_job(state: &mut AppState) {
-    let Some(job) = state.leftover_job.as_mut() else {
-        return;
-    };
-    let Some(list) = job.poll() else {
-        return;
-    };
-    let target = job.app_path.clone();
-    state.leftover_job = None;
-
-    let home = state.home.clone();
-    let st = &mut state.uninstall;
-    st.leftovers_loading = None;
-
-    let Some(row) = st.apps.iter_mut().find(|a| a.path == target) else {
-        return;
-    };
-    row.leftovers = list
-        .iter()
-        .map(|l| crate::state::LeftoverRow {
-            path: l.path.display().to_string(),
-            display: crate::paths::display_in(&home, &l.path),
-            category: l.category,
-            bytes: l.bytes,
-            needs_admin: l.needs_admin,
-            unmeasured: l.unmeasured,
-        })
-        .collect();
-    row.leftover_bytes = list.iter().map(|l| l.bytes).sum();
-    row.leftovers_loaded = true;
-
-    // 右键点了卸载、只是在等这份残留清单的那一个：现在可以装批次了。
-    // 不在这里接手的话，用户点「卸载」会一直等下去——他在等一个永远不会到的确认框。
-    if state.uninstall.pending_uninstall_after_scan.as_deref() == Some(target.as_str()) {
-        state.uninstall.pending_uninstall_after_scan = None;
-        // 走 `apply` 而不是直接写 `pending_clean`：批次怎么装只有 `action.rs` 一份定义。
-        // 残留已经齐了，这一步不会再发副作用（它不会又去扫一遍）。
-        crate::action::apply(state, crate::action::Action::PrepareUninstall(target));
     }
 }
 
@@ -940,118 +717,6 @@ mod tests {
         }
     }
 
-    /// 「工具」在侧栏里是一个条目，点一下就切过去。
-    ///
-    /// 这一条替代了原来「点顶栏扳手」的那条：导航搬进侧栏后，定位不再靠
-    /// 扫坐标，而是直接按画出来的中文名找——名字常显本来就是为了这件事。
-    /// 两条必须同时成立：点得到工具页，工具页上的卡片点了能发起对应动作
-    /// （只断言「切过去了」会漏掉「卡片是死的」）。
-    #[test]
-    fn clicking_the_tools_item_switches_to_the_tools_page() {
-        let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
-        crate::theme::Theme::install(&ctx);
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1120.0, 720.0));
-        let base = egui::RawInput {
-            screen_rect: Some(screen),
-            ..Default::default()
-        };
-        let mut app = MoltApp::headless(
-            &ctx,
-            crate::theme::Mode::Light,
-            AppState::new("/Users/me".into()),
-        );
-        let modifiers = egui::Modifiers::default();
-        let click = |pos: egui::Pos2| -> (egui::RawInput, egui::RawInput) {
-            let mut down = base.clone();
-            down.events = vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers,
-                },
-            ];
-            let mut up = base.clone();
-            up.events = vec![egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers,
-            }];
-            (down, up)
-        };
-
-        // 第一帧：从侧栏里找到「工具」两个字。文字矩形的中心才是可点的位置。
-        let mut texts: Vec<(String, egui::Pos2)> = Vec::new();
-        let mut out = ctx.run_ui(base.clone(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.draw(ui));
-        });
-        out.textures_delta.clear();
-        for cs in &out.shapes {
-            walk_centers(&cs.shape, &mut texts);
-        }
-        // 侧栏宽 196 点（乘缩放）；正文大标题从 x > 313 起，用 280 把两者分开。
-        let (_, item) = texts
-            .iter()
-            .find(|(t, p)| t == "工具" && p.x < 280.0)
-            .expect("侧栏里要有「工具」这一项");
-        let item = *item;
-
-        let (down, up) = click(item);
-        let mut o = ctx.run_ui(down, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.draw(ui));
-        });
-        o.textures_delta.clear();
-        let mut o = ctx.run_ui(up, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.draw(ui));
-        });
-        o.textures_delta.clear();
-        assert_eq!(app.state.page, Page::Tools, "点侧栏「工具」要切到工具页");
-
-        // 工具页得真的把注册表里每一件都画出来——空页等于「点了没东西」。
-        let mut texts = Vec::new();
-        let mut o = ctx.run_ui(base.clone(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.draw(ui));
-        });
-        o.textures_delta.clear();
-        for cs in &o.shapes {
-            walk_centers(&cs.shape, &mut texts);
-        }
-        for name in ["新建文件夹 / 文件", "打开临时空间"] {
-            assert!(
-                texts.iter().any(|(t, _)| t.contains(name)),
-                "工具页要画出「{name}」，实际 {texts:#?}"
-            );
-        }
-        assert!(
-            !texts.iter().any(|(t, _)| t.contains("重新扫描")),
-            "工具页不该再有扫描项，实际 {texts:#?}"
-        );
-
-        // 卡片必须可点：点「新建文件夹」那张，要打开新建窗口。
-        let (_, card) = texts
-            .iter()
-            .find(|(t, _)| t.contains("新建文件夹"))
-            .expect("工具卡片要画出来");
-        let card = *card;
-        let (down, up) = click(card);
-        let mut o = ctx.run_ui(down, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.draw(ui));
-        });
-        o.textures_delta.clear();
-        let mut o = ctx.run_ui(up, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| app.draw(ui));
-        });
-        o.textures_delta.clear();
-        assert!(
-            app.state.create.open,
-            "点工具卡片（{card:?}）要打开新建窗口（当前 open = {}）",
-            app.state.create.open
-        );
-    }
-
     /// 品牌与窗口标题必须是新名字，旧名不能再出现。
     #[test]
     fn brand_uses_the_new_name() {
@@ -1068,6 +733,45 @@ mod tests {
             !texts.iter().any(|(t, _)| t.contains("蜕")),
             "旧名不该再出现：{texts:#?}"
         );
+    }
+
+    /// 页面快捷键要经过真实绘制和 Action 分发，不只检查键位表。
+    #[test]
+    fn command_number_switches_sidebar_page() {
+        let ctx = egui::Context::default();
+        let mut app = MoltApp::headless(
+            &ctx,
+            crate::theme::Mode::Light,
+            AppState::new("/Users/me".into()),
+        );
+        let modifiers = egui::Modifiers {
+            command: true,
+            ..Default::default()
+        };
+        for (key, expected) in [
+            (egui::Key::Num5, Page::Settings),
+            (egui::Key::Num1, Page::Workbench),
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1120.0, 800.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.draw(ui));
+            });
+            output.textures_delta.clear();
+            assert_eq!(app.state.page, expected);
+        }
     }
 
     /// 侧栏把中文页名常显出来：认页不再靠记图标形状。
@@ -1144,7 +848,14 @@ mod tests {
             }
             let mut out = ctx.run_ui(input.clone(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let resp = crate::widgets::nav_icon(ui, &p, Page::Settings.icon(), false, None);
+                    let resp = crate::widgets::nav_icon(
+                        ui,
+                        &p,
+                        Page::Settings.icon(),
+                        "设置",
+                        false,
+                        None,
+                    );
                     rect.set(resp.rect);
                     if resp.clicked() {
                         hit.set(true);
@@ -1302,10 +1013,10 @@ mod tests {
 
         assert_eq!(
             bands.len(),
-            7,
-            "侧栏要能点出七个互不重叠的条目，实际 {bands:?}"
+            5,
+            "侧栏要能点出五个互不重叠的条目，实际 {bands:?}"
         );
-        // 视觉顺序必须还是 清理 → 临时空间 → 卸载 → 历史 → 自动清理 → 工具 → 设置
+        // 视觉顺序必须还是 清理 → 临时空间 → 历史 → 自动清理 → 设置
         let order: Vec<Page> = bands.iter().map(|(_, _, p)| *p).collect();
         assert_eq!(order, Page::ALL.to_vec(), "侧栏顺序不对：{bands:?}");
 
@@ -1511,6 +1222,7 @@ mod tests {
                 bytes: 1024,
                 at: "2026-10-20T10:00:00Z".into(),
                 purge_after: "2026-10-27T10:00:00Z".into(),
+                batch: Some("sample-batch".into()),
                 restorable: true,
             },
             crate::state::QuarantineRow {
@@ -1519,6 +1231,7 @@ mod tests {
                 bytes: 2048,
                 at: "2026-10-20T10:00:00Z".into(),
                 purge_after: "2026-10-27T10:00:00Z".into(),
+                batch: Some("sample-batch".into()),
                 restorable: true,
             },
         ];

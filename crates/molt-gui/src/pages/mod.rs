@@ -8,6 +8,4 @@ pub mod automation;
 pub mod history;
 pub mod quarantine;
 pub mod settings;
-pub mod tools;
-pub mod uninstall;
 pub mod workbench;

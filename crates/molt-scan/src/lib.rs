@@ -14,8 +14,13 @@ use std::path::{Path, PathBuf};
 
 pub mod discover;
 pub mod disk;
+pub mod duplicates;
 
 pub use discover::{discover, Discovered};
+pub use duplicates::{
+    find_duplicates, find_duplicates_with_progress, DuplicateFile, DuplicateGroup, DuplicatePhase,
+    DuplicateScan, DuplicateTick,
+};
 
 /// 一个目录/文件量出来的体积。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

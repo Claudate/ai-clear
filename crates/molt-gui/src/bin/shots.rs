@@ -14,8 +14,9 @@ use std::sync::Arc;
 
 use eframe::egui;
 use molt_core::{Candidate, CostKind, ItemKind, ProtectReason, RebuildCost, Verdict};
-use molt_gui::state::{AppRow, AppState, HistoryRow, Page};
+use molt_gui::state::{AppState, HistoryRow, Page};
 use molt_gui::theme::Mode;
+use molt_scan::{DuplicateFile, DuplicateGroup, DuplicateScan};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -37,7 +38,7 @@ fn main() {
     eframe::run_native(
         "shots",
         options,
-        Box::new(move |cc| Ok(Box::new(Shots::new(cc, out, only)))),
+        Box::new(move |cc| Ok(Box::new(Shots::new(cc, out, only)?))),
     )
     .expect("跑快照");
 }
@@ -52,19 +53,28 @@ struct Case {
 
 /// 窄窗要看的不是「好不好看」，而是会不会把按钮挤出屏幕、
 /// 或者把一行数字括成两层。尺寸按小尺寸笔记本的可视区域取。
-const NARROW: &[&str] = &["18-narrow-workbench", "27-narrow-status-bar"];
+const NARROW: &[&str] = &[
+    "12c-narrow-quarantine",
+    "18-narrow-workbench",
+    "18a-narrow-pending-release",
+    "27-narrow-status-bar",
+    "45-narrow-workbench-detail",
+    "46-narrow-duplicates",
+];
 const NARROW_SIZE: [f32; 2] = [760.0, 640.0];
 
 /// 清单展开后要往下读很长一段，默认 800 高的窗只拍得到首屏。
 /// 这一张是为了核对「每条到底多高、一屏能读几条」，所以给足高度。
 const TALL: &[&str] = &[
     "23a-workbench-list",
+    "23e-workbench-group-partial",
     "23b-workbench-list-ai",
     "23c-workbench-list-dark",
     "23d-workbench-partial-failure",
-    // 抽屉从窗口顶部拉到底部，矮窗里只能看到半页。
-    "43-workbench-detail",
-    "44-workbench-detail-dark",
+    "17-settings",
+    "17c-settings-dark",
+    "46-duplicates",
+    "46b-duplicates-dark",
 ];
 const TALL_SIZE: [f32; 2] = [1120.0, 1600.0];
 
@@ -85,7 +95,7 @@ impl Shots {
         cc: &eframe::CreationContext<'_>,
         out: std::path::PathBuf,
         only: Option<String>,
-    ) -> Self {
+    ) -> Result<Self, std::io::Error> {
         let cases = vec![
             Case {
                 name: "01-workbench",
@@ -132,6 +142,24 @@ impl Shots {
                 setup: with_empty,
             },
             Case {
+                name: "46-duplicates",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_duplicate_results,
+            },
+            Case {
+                name: "46b-duplicates-dark",
+                page: Page::Workbench,
+                mode: Mode::Dark,
+                setup: with_duplicate_results,
+            },
+            Case {
+                name: "46-narrow-duplicates",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_duplicate_results,
+            },
+            Case {
                 name: "06-workbench-error",
                 page: Page::Workbench,
                 mode: Mode::Light,
@@ -163,6 +191,18 @@ impl Shots {
             },
             Case {
                 name: "12-quarantine",
+                page: Page::Quarantine,
+                mode: Mode::Light,
+                setup: with_quarantine,
+            },
+            Case {
+                name: "12b-quarantine-dark",
+                page: Page::Quarantine,
+                mode: Mode::Dark,
+                setup: with_quarantine,
+            },
+            Case {
+                name: "12c-narrow-quarantine",
                 page: Page::Quarantine,
                 mode: Mode::Light,
                 setup: with_quarantine,
@@ -216,10 +256,22 @@ impl Shots {
                 setup: with_settings_advanced,
             },
             Case {
+                name: "17c-settings-dark",
+                page: Page::Settings,
+                mode: Mode::Dark,
+                setup: with_settings_advanced,
+            },
+            Case {
                 name: "18-narrow-workbench",
                 page: Page::Workbench,
                 mode: Mode::Light,
                 setup: with_data,
+            },
+            Case {
+                name: "18a-narrow-pending-release",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_list_pending_release,
             },
             Case {
                 name: "19-workbench-freed",
@@ -252,6 +304,18 @@ impl Shots {
                 setup: with_list_open,
             },
             Case {
+                name: "23e-workbench-group-partial",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_partial_group,
+            },
+            Case {
+                name: "23f-workbench-pending-release",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_list_pending_release,
+            },
+            Case {
                 name: "23d-workbench-partial-failure",
                 page: Page::Workbench,
                 mode: Mode::Light,
@@ -275,14 +339,14 @@ impl Shots {
                 mode: Mode::Light,
                 setup: with_costly_filter,
             },
-            // 清理进行中：环上要有进度弧、圆心要写百分比。
+            // 清理进行中：调试样张注入已处理项数，不用静态动画冒充进度。
             Case {
                 name: "24-workbench-cleaning",
                 page: Page::Workbench,
                 mode: Mode::Light,
                 setup: with_cleaning,
             },
-            // 清完那一刻：满蓝环 + 「清理完成 / 已腾出」。
+            // 清完那一刻：展示实际释放量或移入临时空间的体积。
             Case {
                 name: "25-workbench-cleaned",
                 page: Page::Workbench,
@@ -318,95 +382,6 @@ impl Shots {
                 mode: Mode::Light,
                 setup: with_status_ok,
             },
-            // 卸载页：列应用、展开一个、本体与残留都可单独勾。
-            Case {
-                name: "30-uninstall",
-                page: Page::Uninstall,
-                mode: Mode::Light,
-                setup: with_apps,
-            },
-            // 展开态：详情卡片 + 勾选行 + 「卸载」。
-            Case {
-                name: "38-uninstall-open",
-                page: Page::Uninstall,
-                mode: Mode::Light,
-                setup: with_apps_open,
-            },
-            Case {
-                name: "39-uninstall-open-dark",
-                page: Page::Uninstall,
-                mode: Mode::Dark,
-                setup: with_apps_open,
-            },
-            Case {
-                name: "31-uninstall-dark",
-                page: Page::Uninstall,
-                mode: Mode::Dark,
-                setup: with_apps,
-            },
-            // 一个应用都没有：说的是「这两个目录里没有」，而不是「出错」。
-            Case {
-                name: "32-uninstall-empty",
-                page: Page::Uninstall,
-                mode: Mode::Light,
-                setup: with_apps_empty,
-            },
-            Case {
-                name: "33-uninstall-loading",
-                page: Page::Uninstall,
-                mode: Mode::Light,
-                setup: with_apps_loading,
-            },
-            // 新建浮窗：叠在首页上，三页签 + 预检数字 + 创建按钮。
-            Case {
-                name: "34-create-window",
-                page: Page::Workbench,
-                mode: Mode::Light,
-                setup: with_create,
-            },
-            Case {
-                name: "35-create-window-dark",
-                page: Page::Workbench,
-                mode: Mode::Dark,
-                setup: with_create,
-            },
-            // 输入里有一行越界：预检要当场把它列出来，而不是按下创建才报错。
-            Case {
-                name: "36-create-rejected",
-                page: Page::Workbench,
-                mode: Mode::Light,
-                setup: with_create_rejected,
-            },
-            // 真机形态：数据目录名与应用名不一致，且数据挂在厂商/产品两层里。
-            // 这两个坑只有真盘会暴露，夹具照真机抄一遍，好让以后改匹配规则时看得见后果。
-            Case {
-                name: "37-uninstall-vendor-layout",
-                page: Page::Uninstall,
-                mode: Mode::Light,
-                setup: with_vendor_layout,
-            },
-            // 工具页：顶栏扳手切过去的那一页。
-            // 三个分类、每个工具一张卡片，空分类要留占位。
-            Case {
-                name: "40-tools-page",
-                page: Page::Tools,
-                mode: Mode::Light,
-                setup: with_tools_page,
-            },
-            Case {
-                name: "41-tools-page-dark",
-                page: Page::Tools,
-                mode: Mode::Dark,
-                setup: with_tools_page,
-            },
-            // 扫描中：能按的、不能按的要在同一张图里都看到，
-            // 不能按的那条要写清理由，而不是点下去没反应。
-            Case {
-                name: "42-tools-page-busy",
-                page: Page::Tools,
-                mode: Mode::Light,
-                setup: with_tools_page_busy,
-            },
             // 详情抽屉：一行放不下的完整路径、判定理由与 AI 解释都在这里。
             Case {
                 name: "43-workbench-detail",
@@ -420,12 +395,29 @@ impl Shots {
                 mode: Mode::Dark,
                 setup: with_detail_open,
             },
+            Case {
+                name: "45-narrow-workbench-detail",
+                page: Page::Workbench,
+                mode: Mode::Light,
+                setup: with_detail_open,
+            },
         ];
         // 只保留名字含指定片段的用例：全量出图要遍历每个应用的真实体积，
         // 改一处布局等一分钟不值当。
         let mut cases = cases;
-        if let Some(f) = only {
-            cases.retain(|c| c.name.contains(f.as_str()));
+        #[cfg(not(debug_assertions))]
+        cases.retain(|c| c.name != "24-workbench-cleaning");
+        if let Some(f) = only.as_deref() {
+            cases.retain(|c| c.name.contains(f));
+        }
+        if cases.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "没有与 {:?} 匹配的截图场景；release 构建不提供清理中调试样张",
+                    only.as_deref().unwrap_or("全部")
+                ),
+            ));
         }
 
         let mut s = Self {
@@ -438,7 +430,7 @@ impl Shots {
             app: None,
         };
         s.prepare(cc);
-        s
+        Ok(s)
     }
 
     /// 按当前序号重建界面与状态。
@@ -537,7 +529,7 @@ impl eframe::App for Shots {
                 Mode::Dark => egui::ThemePreference::Dark,
             });
             theme.mode = mode;
-            theme.palette = molt_gui::theme::Palette::of(mode);
+            theme.palette = molt_gui::theme::Palette::of(mode).with_scale(theme.scale);
             theme.follow_system = false;
             molt_gui::theme::reinstall(&ctx, &theme);
             self.app = Some(molt_gui::MoltApp::with_parts(theme, state));
@@ -668,6 +660,15 @@ fn items(n: usize) -> Vec<Candidate> {
             if i % 8 == 0 {
                 c.suggest_clean = true;
             }
+            if i == 0 {
+                c.rule_id = Some("rust-target".into());
+                c.evidence.push(molt_core::Evidence::RuleHit {
+                    rule_id: "rust-target".into(),
+                    pattern: "~/project/**/target".into(),
+                });
+                c.evidence
+                    .push(molt_core::Evidence::LastUsed { days_ago: 62 });
+            }
             c.files = 40 + (i as u64 % 7) * 13;
             c
         })
@@ -686,6 +687,11 @@ fn put(state: &mut AppState, n: usize) {
 
 fn with_data(s: &mut AppState) {
     s.disk = Some(Ok(disk(228 << 30, 19 << 30)));
+    s.quarantine_loading = false;
+    // 真实应用里这个时刻总跟着结果一起写进去（`app.rs` 读缓存、
+    // `pump_scan` 收新一轮结果都写）。夹具漏了它，截图就会显示
+    // 「尚未扫描」而下面列着一屏条目——那是夹具的假象，不是界面的样子。
+    s.last_scan_at = Some("10:42".into());
     put(s, 24);
 }
 
@@ -754,6 +760,48 @@ fn with_empty(s: &mut AppState) {
     put(s, 0);
 }
 
+fn duplicate_file(path: &str, bytes: u64) -> DuplicateFile {
+    DuplicateFile {
+        path: path.into(),
+        bytes,
+        modified: None,
+    }
+}
+
+/// 查重完成且有结果：三文件组与两文件组同时覆盖，路径刻意取长，
+/// 用来核对组摘要、可省空间、定位/复制按钮在真实窗口里的排版。
+fn with_duplicate_results(s: &mut AppState) {
+    with_data(s);
+    s.duplicate_scan = Some(Arc::new(DuplicateScan {
+        groups: vec![
+            DuplicateGroup {
+                bytes: 734 << 20,
+                files: vec![
+                    duplicate_file(
+                        "~/project/atlas/target/debug/deps/libatlas_core.rlib",
+                        734 << 20,
+                    ),
+                    duplicate_file(
+                        "~/backup/atlas/target/debug/deps/libatlas_core.rlib",
+                        734 << 20,
+                    ),
+                    duplicate_file("~/Library/Caches/atlas-build/libatlas_core.rlib", 734 << 20),
+                ],
+            },
+            DuplicateGroup {
+                bytes: 128 << 20,
+                files: vec![
+                    duplicate_file("~/project/notes/export/archive.bin", 128 << 20),
+                    duplicate_file("~/Desktop/old-export/archive.bin", 128 << 20),
+                ],
+            },
+        ],
+        skipped: 2,
+        truncated: false,
+        files_seen: 184,
+    }));
+}
+
 fn with_error(s: &mut AppState) {
     s.disk = Some(Ok(disk(228 << 30, 120 << 30)));
     s.error = Some("遍历 ~/Library/Caches 时被系统拒绝：没有读取权限".into());
@@ -814,6 +862,29 @@ fn with_list_open(s: &mut AppState) {
     with_data(s);
 }
 
+/// 与临时空间页共用同一批记录，核对首页待释放体积的口径。
+fn with_list_pending_release(s: &mut AppState) {
+    with_data(s);
+    with_quarantine(s);
+}
+
+/// 首组只选一部分，检查横杠、组摘要和未选行是否同时可见。
+fn with_partial_group(s: &mut AppState) {
+    with_data(s);
+    let first = s
+        .result
+        .as_ref()
+        .and_then(|r| {
+            r.items
+                .iter()
+                .find(|c| s.priority_of(c) == molt_gui::state::Priority::Suggested)
+        })
+        .map(|c| c.path.display().to_string());
+    if let Some(path) = first {
+        s.checked.remove(&path);
+    }
+}
+
 /// 清单展开 + 每条都带 AI 解释：这是行高最高的一种情况，也是要看能不能读清的那种。
 /// 清理完成但有几项失败：失败明细默认收起，只留一行摘要。
 ///
@@ -862,15 +933,22 @@ fn with_freed(s: &mut AppState) {
     s.session_freed = 1_240_000_000;
 }
 
-/// 清理进行到一半：进度弧 + 圆心百分比。
+/// 调试截图通过后台任务的 Working 状态展示实际项数与百分比。
 fn with_cleaning(s: &mut AppState) {
     with_data(s);
-    s.clean_anim = 0.46;
-    s.clean_total_items = 24;
-    s.clean_total_bytes = 3_600_000_000;
+    let total = s.checked_count();
+    assert!(total > 0, "清理进度样张需要已勾选的条目");
+    s.clean_total_items = total;
+    s.clean_total_bytes = s.checked_bytes();
+    #[cfg(debug_assertions)]
+    {
+        let done = total / 2;
+        s.clean_job = Some(molt_gui::worker::CleanJob::preview_progress(done, total));
+        s.clean_anim = done as f32 / total as f32;
+    }
 }
 
-/// 刚清完：满蓝环停住，圆心写「清理完成 / 已腾出」。
+/// 刚清完：短暂显示「清理完成」与本次实际处理量。
 fn with_cleaned(s: &mut AppState) {
     with_data(s);
     s.clean_anim = 1.0;
@@ -929,6 +1007,10 @@ fn qrow(id: i64, name: &str, bytes: u64, restorable: bool) -> molt_gui::state::Q
         bytes,
         at: "2026-10-20T10:00:00Z".into(),
         purge_after: "2026-10-27T10:00:00Z".into(),
+        batch: match id {
+            1 | 2 => Some("2026-10-20-clean".into()),
+            _ => None,
+        },
         restorable,
     }
 }
@@ -1046,242 +1128,4 @@ fn with_settings(s: &mut AppState) {
     s.ai.config.active_provider = "deepseek".into();
     s.ai.config.active_model = "deepseek-chat".into();
     s.ai.config.providers[2].api_key = "sk-shots-demo".into();
-}
-
-// ---- 卸载页 ----
-
-fn lrow(path: &str, category: &'static str, bytes: u64) -> molt_gui::state::LeftoverRow {
-    molt_gui::state::LeftoverRow {
-        path: path.to_string(),
-        display: path.to_string(),
-        category,
-        bytes,
-        needs_admin: path.starts_with("/Library/"),
-        unmeasured: false,
-    }
-}
-
-fn arow(
-    name: &str,
-    path: &str,
-    bundle: Option<&str>,
-    bytes: u64,
-    leftovers: Vec<molt_gui::state::LeftoverRow>,
-) -> AppRow {
-    let leftover_bytes = leftovers.iter().map(|l| l.bytes).sum();
-    AppRow {
-        name: name.to_string(),
-        path: path.to_string(),
-        bundle_id: bundle.map(|s| s.to_string()),
-        bytes,
-        bytes_known: true,
-        leftovers,
-        leftover_bytes,
-        // 出图时不读真实图标：夹具里的路径在本机多半不存在，
-        // 而「首字母方块」这条退路本来也要能看。
-        icon_file: None,
-        // 夹具的残留是现成的，等同于「已经扫过」
-        leftovers_loaded: true,
-    }
-}
-
-/// 真机形态：三条性能与视觉上都有代表性的应用。
-///
-/// - Chrome：数据在 `Application Support/Google/Chrome` 与 `Caches/Google/Chrome`，
-///   名字带了厂商却没有 `com.google.Chrome` 这个目录。
-/// - VS Code：`.app` 叫 `Visual Studio Code`，数据目录却叫 `Code`。
-/// - Obsidian：数据目录与 `.app` 同名，是「正常」的那一类。
-///
-/// 三种形态并排，任何一条匹配规则退化了，这张图都能看出来。
-fn with_vendor_layout(s: &mut AppState) {
-    s.disk = Some(Ok(disk(228 << 30, 40 << 30)));
-    s.uninstall.apps = vec![
-        arow(
-            "Google Chrome",
-            "/Applications/Google Chrome.app",
-            Some("com.google.Chrome"),
-            2_100_000_000,
-            vec![
-                lrow(
-                    "~/Library/Application Support/Google/Chrome",
-                    "应用数据",
-                    5_100_000_000,
-                ),
-                lrow("~/Library/Caches/Google/Chrome", "缓存", 1_100_000_000),
-                lrow(
-                    "~/Library/Preferences/com.google.Chrome.plist",
-                    "偏好设置",
-                    4_000,
-                ),
-            ],
-        ),
-        arow(
-            "Visual Studio Code",
-            "/Applications/Visual Studio Code.app",
-            Some("com.microsoft.VSCode"),
-            1_400_000_000,
-            vec![
-                lrow(
-                    "~/Library/Application Support/Code",
-                    "应用数据",
-                    2_800_000_000,
-                ),
-                lrow("~/Library/Caches/com.microsoft.VSCode", "缓存", 2_800_000),
-            ],
-        ),
-        arow(
-            "Obsidian",
-            "/Applications/Obsidian.app",
-            Some("md.obsidian"),
-            481_900_000,
-            vec![lrow(
-                "~/Library/Application Support/Obsidian",
-                "应用数据",
-                89_900_000,
-            )],
-        ),
-    ];
-    let path = s.uninstall.apps[0].path.clone();
-    s.uninstall.open = Some(path);
-}
-
-/// 卸载页的正常状态：用**本机真实装着的几个应用**，图标才画得出来。
-///
-/// 假名字（Docker / Figma）在这台机器上解不出图标，出图时全是首字母方块，
-/// 看不出网格到底对不对。这里挑几个各有代表性的真实 `.app`：
-/// 图标在 icns 里的（Chrome）、二进制 Info.plist 的（VS Code）、
-/// 大小写混排名字的（wpsoffice）、以及只有一个词的（Obsidian）。
-///
-/// 只读这几个的 Info.plist，不遍历整盘的体积——全量扫描要几分钟，
-/// 出图工具不该为了一张图等那么久。
-fn with_apps(s: &mut AppState) {
-    s.disk = Some(Ok(disk(228 << 30, 40 << 30)));
-    const PICKS: [&str; 8] = [
-        "Google Chrome",
-        "Visual Studio Code",
-        "Obsidian",
-        "WeChat",
-        "Clash Verge",
-        "Termius",
-        "ModelTest",
-        "Bunch",
-    ];
-    let mut rows = Vec::new();
-    for name in PICKS {
-        let app = std::path::Path::new("/Applications").join(format!("{name}.app"));
-        if !app.is_dir() {
-            continue;
-        }
-        // 体积用固定值：真实体积要遍历整个 .app，几十万文件会拖住出图。
-        // 网格要验的是排布与图标，不是数字。
-        let bytes = match name {
-            "Google Chrome" => 2_100_000_000,
-            "Visual Studio Code" => 1_400_000_000,
-            _ => 180_000_000,
-        };
-        // 借 `scan_apps` 读 Info.plist（它只开这一个文件，不遍历目录），
-        // 但把体积换成固定值——真实体积要遍历几十万文件，出图等不起。
-        let meta = molt_act::uninstall::read_app_meta(&app);
-        rows.push(AppRow {
-            name: name.to_string(),
-            path: app.display().to_string(),
-            bundle_id: meta.bundle_id,
-            bytes,
-            bytes_known: true,
-            leftover_bytes: 0,
-            leftovers: Vec::new(),
-            icon_file: meta.icon_file,
-            // 真机路径量体积太慢，这里只借 Info.plist 造行；残留没扫过
-            leftovers_loaded: false,
-        });
-    }
-    rows.sort_by_key(|a| std::cmp::Reverse(a.bytes));
-    s.uninstall.apps = rows;
-    s.uninstall.loading = false;
-    s.uninstall.scanned_dirs = vec!["/Applications".into(), "~/Applications".into()];
-}
-
-/// 同上，但展开体积最大的那个应用——详情卡片、勾选行、「卸载」按钮都在这一张里。
-///
-/// 残留清单照 Chrome 真机上的形态写死。这里**不**调 `leftovers_for`：
-/// 那要遍历真实的 9 GB 目录来算体积，出一次图要等一分钟以上。
-/// 匹配规则本身有单元测试守着，出图只需要一个像样的清单。
-fn with_apps_open(s: &mut AppState) {
-    with_apps(s);
-    let Some(first) = s.uninstall.apps.first() else {
-        return;
-    };
-    let path = first.path.clone();
-    let rows = vec![
-        lrow(
-            "~/Library/Application Support/Google/Chrome",
-            "应用数据",
-            5_100_000_000,
-        ),
-        lrow("~/Library/Caches/Google/Chrome", "缓存", 1_100_000_000),
-        lrow("~/Library/WebKit/com.google.Chrome", "网页数据", 96_000_000),
-        lrow(
-            "/Library/Application Support/com.google.Chrome",
-            "系统级数据",
-            2_600_000,
-        ),
-        lrow(
-            "~/Library/Preferences/com.google.Chrome.plist",
-            "偏好设置",
-            4_000,
-        ),
-    ];
-    let total: u64 = rows.iter().map(|r| r.bytes).sum();
-    if let Some(app) = s.uninstall.apps.first_mut() {
-        app.leftovers = rows;
-        app.leftover_bytes = total;
-    }
-    s.uninstall.open = Some(path);
-}
-
-fn with_apps_empty(s: &mut AppState) {
-    s.disk = Some(Ok(disk(228 << 30, 120 << 30)));
-    s.uninstall.loading = false;
-    s.uninstall.scanned_dirs = vec!["/Applications".into(), "~/Applications".into()];
-}
-
-fn with_apps_loading(s: &mut AppState) {
-    s.disk = Some(Ok(disk(228 << 30, 120 << 30)));
-    s.uninstall.loading = true;
-}
-
-// ---- 新建浮窗 ----
-
-/// 浮窗打开、输入了一组路径：预检数字要跟着输入走。
-fn with_create(s: &mut AppState) {
-    with_data(s);
-    s.create.open = true;
-    s.create.root = "~/project/new-app".into();
-    s.create.lines = "src/\ntests/\ndocs/\nREADME.md\nCargo.toml\n.gitignore\n".into();
-}
-
-/// 输入里混了一行越界路径：预检要当场列出来。
-fn with_create_rejected(s: &mut AppState) {
-    with_data(s);
-    s.create.open = true;
-    s.create.root = "~/project/new-app".into();
-    s.create.lines = "src/\n../../etc/passwd\nREADME.md\n".into();
-}
-
-/// 工具页的样子。页面本身画三分类、三个工具。
-fn with_tools_page(s: &mut AppState) {
-    with_data(s);
-}
-
-/// 同上，但正处在一个会碰盘的动作里：工具页里「新建」与「重新扫描」
-/// 都不可按，并写明为什么。
-///
-/// 这张图要能同时看到「能按的」和「不能按的」两种条目——
-/// 只有前者的话，用户点了一个不响应的条目会以为界面坏了。
-///
-/// 用 `restoring` 这个既有的忙碌位来模拟，不真的起一个扫描线程：
-/// 出图要的是那一屏的观感，不是重跑一次扫描。
-fn with_tools_page_busy(s: &mut AppState) {
-    with_tools_page(s);
-    s.restoring = Some(1);
 }

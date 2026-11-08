@@ -10,26 +10,14 @@
 //!
 //! 整个进程只有一个测试：改 `HOME` 是进程级的，并行跑会互相污染。
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use molt_core::{Candidate, ItemKind, Verdict};
 use molt_gui::state::{AppState, StatusKind};
-
-fn tmp_home(tag: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!(
-        "molt-flow-{}-{}-{}",
-        std::process::id(),
-        tag,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p
-}
 
 fn make_dir_with_file(path: &Path, name: &str, bytes: usize) -> PathBuf {
     std::fs::create_dir_all(path).unwrap();
@@ -83,7 +71,7 @@ fn wait_purge(state: &mut AppState) {
 
 #[test]
 fn both_clean_paths_run_for_real_in_a_fake_home() {
-    let home = tmp_home("paths");
+    let home = common::tmp_home("paths");
     // 先设 HOME：后面所有 paths::* 都会读它
     std::env::set_var("HOME", &home);
     let home_str = home.to_string_lossy().to_string();
@@ -213,6 +201,16 @@ fn both_clean_paths_run_for_real_in_a_fake_home() {
         .expect("应能找到 npm 那条")
         .id;
     molt_gui::pages::quarantine::restore(&mut state, restore_id);
+    // 还原走后台任务：解压大目录不能把窗口冻住。测试里替主循环 pump 到结束。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while state.restore_job.is_some() && std::time::Instant::now() < deadline {
+        molt_gui::pages::quarantine::pump_restore(&mut state);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        state.restore_job.is_none(),
+        "还原任务必须在超时前结束，否则界面会一直停在「正在还原」"
+    );
     assert!(qa.exists(), "还原后内容必须回到原位置");
     assert!(
         state.status.as_ref().map(|s| s.kind) == Some(StatusKind::Info),

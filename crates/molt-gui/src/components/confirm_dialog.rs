@@ -85,8 +85,7 @@ impl<'a> ConfirmDialog<'a> {
 
     /// 画出来。`body` 是中间那段自定义内容（对象清单之类）。
     ///
-    /// 返回 `true` 表示用户确认了。点遮罩或按 Esc 不算确认，也不算取消——
-    /// 调用方自己决定这种情况怎么处理（通常是关掉）。
+    /// Esc 与点遮罩都返回取消；危险动作必须持续按住确认按钮 1.2 秒。
     pub fn show(
         &self,
         ui: &mut egui::Ui,
@@ -96,9 +95,11 @@ impl<'a> ConfirmDialog<'a> {
         let danger = self.kind == ConfirmKind::Danger;
         let accent = if danger { p.danger } else { p.reclaimable };
         let mut outcome = ConfirmOutcome::Open;
+        let focus_id = egui::Id::unique((self.id, "initial-cancel-focus"));
+        let hold_id = egui::Id::unique((self.id, "danger-hold-start"));
 
-        egui::Modal::new(egui::Id::unique(self.id))
-            .backdrop_color(egui::Color32::from_black_alpha(80))
+        let modal = egui::Modal::new(egui::Id::unique(self.id))
+            .backdrop_color(p.scrim)
             .frame(
                 egui::Frame::NONE
                     .fill(p.surface)
@@ -178,21 +179,83 @@ impl<'a> ConfirmDialog<'a> {
                 body(ui);
 
                 ui.add_space(18.0);
-                // 确认在前、取消在后：动作按钮靠左，与全站「主操作在左」一致。
+                // 普通确认保持原有单击路径；不可撤销动作必须真正持续按住。
                 ui.horizontal(|ui| {
                     if danger {
-                        if crate::widgets::danger_button(ui, p, &self.confirm_label, true) {
-                            outcome = ConfirmOutcome::Confirmed;
+                        let button = egui::Button::new(
+                            egui::RichText::new(format!("按住 1.2 秒 · {}", self.confirm_label))
+                                .size(p.sz(13.0))
+                                .strong()
+                                .color(p.on_danger),
+                        )
+                        .corner_radius(egui::CornerRadius::same(RADIUS_CONTROL))
+                        .min_size(egui::vec2(0.0, p.sz(36.0)))
+                        .fill(p.danger);
+                        let response = ui.add(button);
+                        let started = ui.data(|d| d.get_temp::<f64>(hold_id));
+                        // egui 的 Button 在持续按住接近一秒后可能停止报告 down-on；
+                        // 只对从本按钮起始的按压继续跟踪真实指针，不允许从外部拖进来触发。
+                        let pointer_held = response.is_pointer_button_down_on()
+                            || (started.is_some()
+                                && ui.input(|i| {
+                                    i.pointer.primary_down()
+                                        && i.pointer
+                                            .interact_pos()
+                                            .is_some_and(|pos| response.rect.contains(pos))
+                                }));
+                        let held = pointer_held
+                            || (response.has_focus() && ui.input(|i| i.key_down(egui::Key::Space)));
+                        if held {
+                            let now = ui.input(|i| i.time);
+                            let started_at = started.unwrap_or(now);
+                            ui.data_mut(|d| d.insert_temp(hold_id, started_at));
+                            let fraction = ((now - started_at) / 1.2).clamp(0.0, 1.0) as f32;
+                            if fraction >= 1.0 {
+                                outcome = ConfirmOutcome::Confirmed;
+                                ui.data_mut(|d| d.remove::<f64>(hold_id));
+                            } else {
+                                let bar = egui::Rect::from_min_size(
+                                    response.rect.left_bottom() - egui::vec2(0.0, p.sz(3.0)),
+                                    egui::vec2(response.rect.width() * fraction, p.sz(3.0)),
+                                );
+                                ui.painter().rect_filled(bar, 1.0, p.on_danger);
+                                ui.ctx()
+                                    .request_repaint_after(std::time::Duration::from_millis(40));
+                            }
+                        } else {
+                            ui.data_mut(|d| d.remove::<f64>(hold_id));
                         }
                     } else if crate::widgets::primary_button(ui, p, &self.confirm_label, true) {
                         outcome = ConfirmOutcome::Confirmed;
                     }
-                    if crate::widgets::secondary_button(ui, p, &self.cancel_label, true) {
+                    let cancel = egui::Button::new(
+                        egui::RichText::new(&self.cancel_label)
+                            .size(p.sz(12.5))
+                            .color(p.text),
+                    )
+                    .corner_radius(egui::CornerRadius::same(RADIUS_CONTROL))
+                    .min_size(egui::vec2(0.0, p.sz(30.0)))
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::new(1.0, p.border_strong));
+                    let response = ui.add(cancel);
+                    if !ui.data(|d| d.get_temp::<bool>(focus_id).unwrap_or(false)) {
+                        response.request_focus();
+                        ui.data_mut(|d| d.insert_temp(focus_id, true));
+                    }
+                    if response.clicked() {
                         outcome = ConfirmOutcome::Cancelled;
                     }
                 });
             });
-
+        if outcome == ConfirmOutcome::Open && modal.should_close() {
+            outcome = ConfirmOutcome::Cancelled;
+        }
+        if outcome != ConfirmOutcome::Open {
+            ui.ctx().data_mut(|d| {
+                d.remove::<bool>(focus_id);
+                d.remove::<f64>(hold_id);
+            });
+        }
         outcome
     }
 }
@@ -211,7 +274,7 @@ pub enum ConfirmOutcome {
 /// 确认框里的对象清单。
 ///
 /// 只给数字是不够的：用户有权在不可撤销之前看见选了什么。
-/// 首页与隔离区共用这一份；差别只在尾部那句汇总，由调用方给文案。
+/// 首页与隔离区共用这一份；默认只展示摘要，路径由用户主动展开核对。
 pub fn item_list(
     ui: &mut egui::Ui,
     p: &Palette,
@@ -219,6 +282,25 @@ pub fn item_list(
     rows: &[(String, String)],
     footer: Option<String>,
 ) {
+    let open_id = ui.make_persistent_id("confirm-item-details");
+    let mut open = ui.data(|d| d.get_temp::<bool>(open_id).unwrap_or(false));
+    if crate::widgets::secondary_button(
+        ui,
+        p,
+        if open {
+            "收起所选明细"
+        } else {
+            "查看所选明细"
+        },
+        true,
+    ) {
+        open = !open;
+        ui.data_mut(|d| d.insert_temp(open_id, open));
+    }
+    if !open {
+        return;
+    }
+    ui.add_space(6.0);
     egui::Frame::NONE
         .fill(p.surface_alt)
         .corner_radius(egui::CornerRadius::same(RADIUS_CONTROL))
@@ -267,4 +349,131 @@ pub fn item_list(
                 );
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find_text(shape: &egui::epaint::Shape, needle: &str) -> Option<egui::Pos2> {
+        match shape {
+            egui::epaint::Shape::Text(t) if t.galley.text().contains(needle) => {
+                Some(t.pos + egui::vec2(10.0, 8.0))
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                shapes.iter().find_map(|shape| find_text(shape, needle))
+            }
+            _ => None,
+        }
+    }
+
+    fn frame(
+        ctx: &egui::Context,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> (ConfirmOutcome, Vec<egui::epaint::ClippedShape>) {
+        let input = egui::RawInput {
+            time: Some(time),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 680.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut outcome = ConfirmOutcome::Open;
+        let mut output = ctx.run_ui(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                outcome =
+                    ConfirmDialog::new("test-danger", ConfirmKind::Danger, "永久删除这些内容？")
+                        .confirm_label("永久删除")
+                        .show(ui, &Palette::light(), |_| {});
+            });
+        });
+        output.textures_delta.clear();
+        (outcome, output.shapes)
+    }
+
+    #[test]
+    fn danger_requires_continuous_hold_and_escape_cancels() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        crate::theme::Theme::install(&ctx);
+        frame(&ctx, 0.0, vec![]);
+        let (outcome, shapes) = frame(&ctx, 0.02, vec![]);
+        assert_eq!(outcome, ConfirmOutcome::Open);
+        let pos = shapes
+            .iter()
+            .find_map(|s| find_text(&s.shape, "按住 1.2 秒"))
+            .expect("确认框必须展示长按按钮");
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        assert_eq!(
+            frame(
+                &ctx,
+                0.1,
+                vec![egui::Event::PointerMoved(pos), button(true)]
+            )
+            .0,
+            ConfirmOutcome::Open
+        );
+        assert_eq!(
+            frame(&ctx, 0.4, vec![button(false)]).0,
+            ConfirmOutcome::Open,
+            "短按释放不能删除"
+        );
+        assert_eq!(
+            frame(&ctx, 2.0, vec![]).0,
+            ConfirmOutcome::Open,
+            "释放后等待不能累计长按时间"
+        );
+        assert_eq!(frame(&ctx, 2.2, vec![button(true)]).0, ConfirmOutcome::Open);
+        for step in 1..=12 {
+            let outcome = frame(
+                &ctx,
+                2.2 + step as f64 * 0.1,
+                vec![egui::Event::PointerMoved(pos)],
+            )
+            .0;
+            if step < 12 {
+                assert_eq!(outcome, ConfirmOutcome::Open, "尚未按够 1.2 秒不能确认");
+            } else {
+                assert_eq!(
+                    outcome,
+                    ConfirmOutcome::Confirmed,
+                    "连续跨帧按住至少 1.2 秒才确认"
+                );
+            }
+        }
+
+        let cancel_ctx = egui::Context::default();
+        crate::theme::install_fonts(&cancel_ctx);
+        crate::theme::Theme::install(&cancel_ctx);
+        frame(&cancel_ctx, 0.0, vec![]);
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        assert_eq!(
+            frame(&cancel_ctx, 0.1, vec![key(egui::Key::Enter)]).0,
+            ConfirmOutcome::Cancelled,
+            "默认焦点应在取消按钮"
+        );
+        let esc_ctx = egui::Context::default();
+        crate::theme::install_fonts(&esc_ctx);
+        crate::theme::Theme::install(&esc_ctx);
+        frame(&esc_ctx, 0.0, vec![]);
+        assert_eq!(
+            frame(&esc_ctx, 0.1, vec![key(egui::Key::Escape)]).0,
+            ConfirmOutcome::Cancelled,
+            "Esc 应取消而不是执行删除"
+        );
+    }
 }

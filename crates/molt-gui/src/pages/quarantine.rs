@@ -18,21 +18,19 @@ use crate::widgets::{
 };
 
 pub fn show(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Action>) {
-    page_header(
-        ui,
-        p,
-        "临时空间",
-        &format!(
-            "从原位置移走的内容会保留 {} 天，期间随时可以还原，也可以在这里彻底删除。",
-            crate::paths::DEFAULT_RETAIN_DAYS
-        ),
-        |ui| {
-            if secondary_button(ui, p, "刷新", !state.is_purging() && state.can_start()) {
-                acts.push(Action::LoadQuarantine);
-            }
-        },
-    );
-    ui.add_space(12.0);
+    page_header(ui, p, "临时空间", "", |ui| {
+        if secondary_button(ui, p, "刷新", !state.is_purging() && state.can_start()) {
+            acts.push(Action::LoadQuarantine);
+        }
+    });
+    ui.add_space(p.sz(14.0));
+    // 截图顶部的数量直接取当前审计记录；读取中或失败时不能拿旧值当现状。
+    if state.quarantine_error.is_none() && !state.quarantine_loading {
+        summary_card(ui, state, p);
+        ui.add_space(p.sz(12.0));
+    }
+    storage_note(ui, p, acts);
+    ui.add_space(p.sz(10.0));
 
     // 读失败优先于「空」：这两件事长得像，但对用户的含义完全相反。
     if let Some(err) = state.quarantine_error.clone() {
@@ -90,8 +88,7 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Act
         return;
     }
 
-    summary_card(ui, state, p);
-    ui.add_space(10.0);
+    footer(ui, state, p, acts);
 
     match crate::widgets::op_report(ui, p, state.last_op.as_deref()) {
         crate::widgets::ReportAction::Dismiss => acts.push(Action::DismissReport),
@@ -103,11 +100,10 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Act
     }
 
     let row_h = p.sz(78.0);
-    let footer_h = p.sz(92.0);
-    let list_h = (ui.available_height() - footer_h).max(p.sz(140.0));
+    let list_h = ui.available_height().max(p.sz(80.0));
 
-    let total = state.quarantine.len();
-    let rows = state.quarantine.clone();
+    // 标题也占一条虚拟行，避免为按批次分组牺牲千条记录的按需绘制。
+    let grouped = grouped_rows(&state.quarantine);
     let mut restore_id: Option<i64> = None;
     let mut toggle_id: Option<i64> = None;
     let mut purge_id: Option<i64> = None;
@@ -115,16 +111,25 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Act
     egui::ScrollArea::vertical()
         .max_height(list_h)
         .auto_shrink([false, false])
-        .show_rows(ui, row_h, total, |ui, range| {
-            // 行距清零：行与行靠一条细线分隔，而不是靠空隙。
+        .show_rows(ui, row_h, grouped.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for i in range {
-                if let Some(row) = rows.get(i) {
-                    match line(ui, state, p, row, row_h) {
-                        RowAction::None => {}
-                        RowAction::Toggle => toggle_id = Some(row.id),
-                        RowAction::Restore => restore_id = Some(row.id),
-                        RowAction::Purge => purge_id = Some(row.id),
+                match grouped[i] {
+                    GroupedRow::Header {
+                        first,
+                        count,
+                        bytes,
+                    } => {
+                        group_header(ui, p, &state.quarantine[first], count, bytes, row_h);
+                    }
+                    GroupedRow::Item(index) => {
+                        let row = &state.quarantine[index];
+                        match line(ui, state, p, row, row_h) {
+                            RowAction::None => {}
+                            RowAction::Toggle => toggle_id = Some(row.id),
+                            RowAction::Restore => restore_id = Some(row.id),
+                            RowAction::Purge => purge_id = Some(row.id),
+                        }
                     }
                 }
             }
@@ -139,10 +144,152 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Act
     if let Some(id) = purge_id {
         acts.push(Action::PreparePurgeOne(id));
     }
-
-    ui.add_space(8.0);
-    footer(ui, state, p, acts);
 }
+
+/// 标题和条目共用固定行高，`show_rows` 只会绘制视口里的行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupedRow {
+    Header {
+        first: usize,
+        count: usize,
+        bytes: u64,
+    },
+    Item(usize),
+}
+
+/// 以真实批次 ID 为键归组；旧记录或异常路径只进入一组未知批次。
+fn grouped_rows(rows: &[crate::state::QuarantineRow]) -> Vec<GroupedRow> {
+    let mut keys: std::collections::HashMap<Option<&str>, usize> = std::collections::HashMap::new();
+    let mut groups: Vec<(Option<&str>, Vec<usize>)> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let batch = row.batch.as_deref();
+        let group = *keys.entry(batch).or_insert_with(|| {
+            groups.push((batch, Vec::new()));
+            groups.len() - 1
+        });
+        groups[group].1.push(index);
+    }
+
+    let mut display = Vec::with_capacity(rows.len() + groups.len());
+    for (_, indices) in groups {
+        let first = indices[0];
+        let bytes = indices.iter().map(|&index| rows[index].bytes).sum();
+        display.push(GroupedRow::Header {
+            first,
+            count: indices.len(),
+            bytes,
+        });
+        display.extend(indices.into_iter().map(GroupedRow::Item));
+    }
+    display
+}
+
+/// 标题与条目等高，保持虚拟列表滚动定位准确；没有批次路径的不贴批次名。
+fn group_header(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    first: &crate::state::QuarantineRow,
+    count: usize,
+    bytes: u64,
+    row_h: f32,
+) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), row_h),
+        egui::Sense::hover(),
+    );
+    ui.painter().rect_filled(rect, 0, p.surface_alt);
+    let painter = ui.painter_at(rect.shrink2(egui::vec2(p.sz(14.0), p.sz(8.0))));
+    let title = if first.batch.is_some() {
+        "清理批次"
+    } else {
+        "未能确定批次"
+    };
+    let detail = first
+        .batch
+        .as_deref()
+        .unwrap_or("旧版记录或路径不符合批次目录结构");
+    let lines = [
+        (
+            title.to_owned(),
+            egui::FontId::proportional(p.sz(12.0)),
+            p.text,
+        ),
+        (
+            format!(
+                "移入 {} · {count} 项 · 原记录体积 {}",
+                crate::components::time::short_time(&first.at),
+                molt_scan::human_bytes(bytes)
+            ),
+            egui::FontId::proportional(p.sz(10.5)),
+            p.text_dim,
+        ),
+        (
+            detail.to_owned(),
+            egui::FontId::monospace(p.sz(10.0)),
+            p.text_faint,
+        ),
+    ];
+    let galleys =
+        lines.map(|(text, font, color)| (painter.layout_no_wrap(text, font, color), color));
+    let gap = p.sz(3.0);
+    let content_h: f32 = galleys
+        .iter()
+        .map(|(galley, _)| galley.size().y)
+        .sum::<f32>()
+        + gap * 2.0;
+    let mut y = rect.center().y - content_h / 2.0;
+    for (galley, color) in galleys {
+        let h = galley.size().y;
+        painter.galley(egui::pos2(rect.left() + p.sz(14.0), y), galley, color);
+        y += h + gap;
+    }
+}
+
+/// 让用户在空、加载失败和有内容时都能知道文件放在哪里以及如何打开。
+fn storage_note(ui: &mut egui::Ui, p: &Palette, acts: &mut Vec<Action>) {
+    card(ui, p, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("存放位置")
+                    .size(p.sz(12.0))
+                    .strong()
+                    .color(p.text),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if secondary_button(ui, p, "在访达中显示", true) {
+                    acts.push(Action::RevealQuarantine);
+                }
+            });
+        });
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(crate::paths::quarantine_root().display().to_string())
+                    .size(p.sz(10.5))
+                    .monospace()
+                    .color(p.text_dim),
+            )
+            .wrap_mode(egui::TextWrapMode::Wrap),
+        );
+        ui.add_space(p.sz(4.0));
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "当前直供版的数据与应用本体分开保存。移除应用不会自动清空这里；若手动删除应用数据目录，尚未还原的内容和还原记录也会丢失。",
+                )
+                .size(p.sz(10.5))
+                .color(p.text_dim),
+            )
+            .wrap_mode(egui::TextWrapMode::Wrap),
+        );
+    });
+}
+
+/// 一屏最多列多少条待还原记录。
+///
+/// 上限本身是必要的（极端情况下审计库里有几万条），但它必须**说得出声**：
+/// `summary_card` 到顶时会补一行「仅列出最近 N 条」。两处共用这个常量，
+/// 免得哪天只改了查询、提示还按旧数判断。
+pub(crate) const LIST_CAP: usize = 2000;
 
 /// 顶部汇总：还剩多少、最晚什么时候到期。
 fn summary_card(ui: &mut egui::Ui, state: &AppState, p: &Palette) {
@@ -157,67 +304,92 @@ fn summary_card(ui: &mut egui::Ui, state: &AppState, p: &Palette) {
         .filter_map(|r| days_left(&r.purge_after).map(|d| (d, r)))
         .min_by_key(|(d, _)| *d);
 
-    card(ui, p, |ui| {
+    ui.vertical(|ui| {
+        // 与设计图一致：数量紧跟页头，大小和项数是同一层级，而不是孤立的两张卡。
         ui.horizontal_wrapped(|ui| {
-            ui.vertical(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(molt_scan::human_bytes(bytes))
-                            .size(p.sz(24.0))
-                            .strong()
-                            .color(p.reclaimable),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Extend),
-                );
-                ui.label(
-                    egui::RichText::new(format!("{} 项还能还原", restorable.len()))
-                        .size(p.sz(11.5))
-                        .color(p.text_dim),
-                );
-            });
-            ui.add_space(20.0);
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(
-                        "这些内容只是被移到了别处，磁盘空间要等彻底删除后才真正释放。",
-                    )
+                    egui::RichText::new(format!("{} 待处理", molt_scan::human_bytes(bytes)))
+                        .size(p.sz(19.0))
+                        .strong()
+                        .color(p.text),
+                )
+                .wrap_mode(egui::TextWrapMode::Extend),
+            );
+            ui.add_space(p.sz(10.0));
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("{} 项可还原", restorable.len()))
+                        .size(p.sz(16.0))
+                        .strong()
+                        .color(p.text),
+                )
+                .wrap_mode(egui::TextWrapMode::Extend),
+            );
+        });
+        ui.add_space(p.sz(4.0));
+        // 保留期不是全局常量：每条记录落盘时就带着自己的 `purge_after`，
+        // 定时任务可以自行设。行内的进度条已经按各自的到期时间算，页头要是
+        // 还写死「默认 7 天」，就会和下面某几行的「已到期」自相矛盾。
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new("到期前可还原；移入这里不会释放磁盘空间，彻底删除才会释放。")
                     .size(p.sz(11.5))
+                    .color(p.text_dim),
+            )
+            .wrap_mode(egui::TextWrapMode::Wrap),
+        );
+        if let Some((d, row)) = soonest {
+            ui.add_space(p.sz(4.0));
+            let when = if d > 0 {
+                format!("{d} 天后")
+            } else if d == 0 {
+                "今天".to_string()
+            } else {
+                "已到期".to_string()
+            };
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "最近到期：{when} · {}",
+                        crate::paths::friendly_name(
+                            &state.home,
+                            std::path::Path::new(&row.original)
+                        )
+                    ))
+                    .size(p.sz(11.0))
+                    .color(p.costly),
+                )
+                .wrap_mode(egui::TextWrapMode::Wrap),
+            );
+        }
+        if broken > 0 {
+            ui.add_space(p.sz(4.0));
+            badge(
+                ui,
+                p,
+                &format!("{broken} 项内容已不在"),
+                p.costly,
+                p.costly_soft,
+            );
+        }
+        // 清单有上限（`LIST_CAP`，在 `reload` 里传给 `list_pending`）。到了
+        // 上限就明说「没看全」——历史页已经这么做了，这里不能默默截断：
+        // 用户数着行数会以为临时空间里就这么多。
+        if state.quarantine.len() >= LIST_CAP {
+            ui.add_space(p.sz(4.0));
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "仅列出最近 {} 条，更早的记录没有显示。",
+                        state.quarantine.len()
+                    ))
+                    .size(p.sz(11.0))
                     .color(p.text_faint),
                 )
                 .wrap_mode(egui::TextWrapMode::Wrap),
             );
-            if let Some((d, row)) = soonest {
-                let when = if d > 0 {
-                    format!("{d} 天后")
-                } else {
-                    "今天".to_string()
-                };
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!(
-                            "最近到期：{when} · {}",
-                            crate::paths::friendly_name(
-                                &state.home,
-                                std::path::Path::new(&row.original)
-                            )
-                        ))
-                        .size(p.sz(11.0))
-                        .color(p.costly),
-                    )
-                    .wrap_mode(egui::TextWrapMode::Wrap),
-                );
-            }
-            if broken > 0 {
-                ui.add_space(8.0);
-                badge(
-                    ui,
-                    p,
-                    &format!("{broken} 项内容已不在"),
-                    p.costly,
-                    p.costly_soft,
-                );
-            }
-        });
+        }
     });
 }
 
@@ -236,7 +408,9 @@ fn line(
     row: &crate::state::QuarantineRow,
     row_h: f32,
 ) -> RowAction {
-    let busy = state.restoring == Some(row.id);
+    // 批量与单条现在共用同一个后台任务：任何还原在跑时，这一行的按钮都该置灰。
+    // 以前这里看 `state.restoring`，而单条路径改成后台之后那个字段就再也不会被写。
+    let busy = state.restore_job.is_some();
     let checked = state.is_quarantine_checked(row.id);
     let full_w = ui.available_width();
     // 右栏是按钮区（大小、还原、彻底删除）。行点击区要把它让出来，
@@ -299,8 +473,9 @@ fn line(
                             )
                             .wrap_mode(egui::TextWrapMode::Truncate),
                         );
+                        let remaining = days_left(&row.purge_after);
                         let note = if row.restorable {
-                            match days_left(&row.purge_after) {
+                            match remaining {
                                 // 「还剩几天」比一个日期有用得多：用户来这页想知道的是
                                 // 会不会没，而不是到期日是哪一天。
                                 Some(d) if d > 0 => format!(
@@ -308,8 +483,12 @@ fn line(
                                     crate::components::time::short_time(&row.at),
                                     crate::components::time::short_time(&row.purge_after)
                                 ),
+                                Some(0) => format!(
+                                    "移入 {} · 今天到期，下次启动尝试清理",
+                                    crate::components::time::short_time(&row.at)
+                                ),
                                 Some(_) => format!(
-                                    "移入 {} · 今天到期，之后会自动删除",
+                                    "移入 {} · 已到期，下次启动尝试清理",
                                     crate::components::time::short_time(&row.at)
                                 ),
                                 None => format!(
@@ -329,6 +508,23 @@ fn line(
                             )
                             .wrap_mode(egui::TextWrapMode::Truncate),
                         );
+                        if let Some(days) = remaining.filter(|_| row.restorable) {
+                            // 定时任务可以自行设保留期，不能把所有记录都按默认 7 天画。
+                            let total = days_until(&row.purge_after, &row.at)
+                                .unwrap_or(crate::paths::DEFAULT_RETAIN_DAYS)
+                                .max(1);
+                            let fraction = (days as f32 / total as f32).clamp(0.0, 1.0);
+                            let color = if days <= 1 { p.costly } else { p.reclaimable };
+                            crate::widgets::progress_bar(
+                                ui,
+                                p,
+                                fraction,
+                                p.sz(148.0).min(ui.available_width()),
+                                "",
+                                p.sz(3.0),
+                                color,
+                            );
+                        }
                     },
                 );
 
@@ -388,62 +584,77 @@ fn line(
 }
 
 fn footer(ui: &mut egui::Ui, state: &AppState, p: &Palette, acts: &mut Vec<Action>) {
-    egui::Frame::NONE
-        .fill(p.bg)
-        .inner_margin(egui::Margin::symmetric(0, 6))
+    egui::Panel::bottom("quarantine-actions")
+        .resizable(false)
+        .frame(
+            egui::Frame::NONE
+                .fill(p.bg)
+                .inner_margin(egui::Margin::symmetric(0, 6)),
+        )
         .show(ui, |ui| {
             crate::widgets::hairline(ui, p);
             let n = state.quarantine_checked_count();
             // 互斥：只要有任务在跑，还原与彻底删除都要置灰并给出理由
             let enabled = n > 0 && state.can_start();
 
-            ui.horizontal(|ui| {
+            let status = |ui: &mut egui::Ui| {
+                if n == 0 {
+                    ui.label(
+                        egui::RichText::new("选中条目后可批量还原或彻底删除")
+                            .size(p.sz(12.0))
+                            .color(p.text_dim),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "已选 {n} 项 · {}",
+                            molt_scan::human_bytes(state.quarantine_checked_bytes())
+                        ))
+                        .size(p.sz(13.0))
+                        .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new("还原放回原位置；彻底删除不可恢复")
+                            .size(p.sz(10.5))
+                            .color(p.text_faint),
+                    );
+                }
+            };
+            let mut buttons = |ui: &mut egui::Ui| {
+                if primary_button(ui, p, "还原所选", enabled) {
+                    acts.push(Action::RestoreSelected);
+                }
+                ui.add_space(6.0);
+                if danger_ghost_button(ui, p, "彻底删除…", enabled) {
+                    acts.push(Action::PreparePurge);
+                }
+                ui.add_space(8.0);
+                if secondary_button(ui, p, "全不选", n > 0 && state.can_select()) {
+                    acts.push(Action::ClearQuarantineSelection);
+                }
+                // 「全选」只在真有可还原条目时才可点：全都写着「内容已不在」时
+                // 按下去只会得到空集，什么反应都没有——那是死按钮。
+                let any_restorable = state.quarantine.iter().any(|r| r.restorable);
+                if secondary_button(ui, p, "全选", state.can_select() && any_restorable) {
+                    acts.push(Action::SelectAllQuarantine);
+                }
+            };
+            if ui.available_width() < p.sz(680.0) {
                 ui.vertical(|ui| {
-                    if n == 0 {
-                        ui.label(
-                            egui::RichText::new("选中条目后可批量还原或彻底删除")
-                                .size(p.sz(12.0))
-                                .color(p.text_dim),
-                        );
-                    } else {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!(
-                                    "已选 {n} 项 · {}",
-                                    molt_scan::human_bytes(state.quarantine_checked_bytes())
-                                ))
-                                .size(p.sz(13.0))
-                                .strong(),
-                            )
-                            .wrap_mode(egui::TextWrapMode::Extend),
-                        );
-                        ui.label(
-                            egui::RichText::new("还原会把内容放回原位置；彻底删除不可恢复")
-                                .size(p.sz(10.5))
-                                .color(p.text_faint),
-                        );
-                    }
+                    status(ui);
+                    ui.add_space(p.sz(4.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        buttons(ui);
+                    });
                 });
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 最右是这一页的主操作：还原（可逆、安全）
-                    if primary_button(ui, p, "还原所选", enabled) {
-                        acts.push(Action::RestoreSelected);
-                    }
-                    ui.add_space(6.0);
-                    // 危险操作紧挨在左：彻底删除，要过一次确认
-                    if danger_ghost_button(ui, p, "彻底删除…", enabled) {
-                        acts.push(Action::PreparePurge);
-                    }
-                    ui.add_space(8.0);
-                    if secondary_button(ui, p, "全不选", n > 0 && state.can_select()) {
-                        acts.push(Action::ClearQuarantineSelection);
-                    }
-                    if secondary_button(ui, p, "全选", state.can_select()) {
-                        acts.push(Action::SelectAllQuarantine);
-                    }
+            } else {
+                ui.horizontal(|ui| {
+                    ui.vertical(status);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        buttons(ui);
+                    });
                 });
-            });
+            }
         });
 }
 
@@ -534,6 +745,8 @@ fn restoring_view(ui: &mut egui::Ui, state: &AppState, p: &Palette) {
             },
             p.sz(300.0),
             "处理中",
+            p.sz(6.0),
+            p.reclaimable,
         );
     });
 }
@@ -571,6 +784,8 @@ fn purging_view(ui: &mut egui::Ui, state: &AppState, p: &Palette) {
             },
             p.sz(300.0),
             "处理中",
+            p.sz(6.0),
+            p.reclaimable,
         );
     });
 }
@@ -608,6 +823,26 @@ pub fn purge_due_on_start(state: &mut AppState) {
     state.status = Some(StatusMessage::info(text));
 }
 
+/// 只认可 `root/<batch>/<item>` 的单层结构；旧版或异常路径不推断批次。
+pub(crate) fn batch_id(
+    root: &std::path::Path,
+    quarantine_path: &std::path::Path,
+) -> Option<String> {
+    use std::path::Component;
+    let mut relative = quarantine_path.strip_prefix(root).ok()?.components();
+    let batch = match relative.next()? {
+        Component::Normal(value) => value.to_str()?.to_owned(),
+        _ => return None,
+    };
+    if batch.is_empty()
+        || !matches!(relative.next()?, Component::Normal(_))
+        || relative.next().is_some()
+    {
+        return None;
+    }
+    Some(batch)
+}
+
 /// 从审计库读隔离区。
 pub fn reload(state: &mut AppState) {
     state.quarantine_loading = true;
@@ -621,9 +856,10 @@ pub fn reload(state: &mut AppState) {
             return;
         }
     };
-    match store.list_pending(2000) {
+    match store.list_pending(LIST_CAP) {
         Ok(recs) => {
             let home = state.home.clone();
+            let root = crate::paths::quarantine_root();
             state.quarantine = recs
                 .into_iter()
                 .map(|r| crate::state::QuarantineRow {
@@ -632,6 +868,7 @@ pub fn reload(state: &mut AppState) {
                     bytes: r.bytes,
                     at: r.performed_at.clone(),
                     purge_after: r.purge_after.clone(),
+                    batch: batch_id(&root, &r.quarantine_path),
                     restorable: r.quarantine_path.exists(),
                 })
                 .collect();
@@ -654,7 +891,11 @@ pub fn reload(state: &mut AppState) {
     state.quarantine_loading = false;
 }
 
-/// 还原一条（或全部勾选）。
+/// 还原一条。
+///
+/// 走的是和批量完全相同的后台任务（`restore_ids`）：大项目目录要解压几十秒，
+/// 同步做会把窗口冻住、连「还原中…」这几个字都画不出来——设置状态和清除状态
+/// 发生在同一次调用里，中间没有一帧。
 pub fn restore(state: &mut AppState, id: i64) {
     // 互斥：还原是写盘动作，不能和扫描/清理/定时任务并行
     if !state.can_start() {
@@ -663,34 +904,7 @@ pub fn restore(state: &mut AppState, id: i64) {
         ));
         return;
     }
-    state.restoring = Some(id);
-    state.status = Some(StatusMessage::info("正在还原…"));
-    let store = match molt_act::AuditStore::open(&crate::paths::audit_db()) {
-        Ok(s) => s,
-        Err(e) => {
-            state.restoring = None;
-            state.status = Some(StatusMessage::error(format!("打开审计库失败：{e}")));
-            return;
-        }
-    };
-    let q = molt_act::Quarantine::new(crate::paths::quarantine_root(), "restore");
-    let exec = molt_act::Executor::new(store, q, crate::paths::DEFAULT_RETAIN_DAYS);
-
-    match exec.restore(id) {
-        Ok(p) => {
-            let shown = crate::paths::display_in(&state.home, &p);
-            state.status = Some(StatusMessage::info(format!("已还原到 {shown}")));
-            state.last_op = None;
-        }
-        Err(e) => {
-            // 还原失败必须说清原因，并且保留这一条在列表里——
-            // 画成「已还原」会让用户以为内容回去了。
-            state.status = Some(StatusMessage::error(format!("还原失败：{e}")));
-        }
-    }
-    state.restoring = None;
-    reload(state);
-    crate::pages::history::reload(state);
+    restore_ids(state, &[id]);
 }
 
 /// 批量还原给定的这些条目（后台执行）。
@@ -924,8 +1138,66 @@ mod tests {
             bytes: 100,
             at: "2026-10-20T10:00:00Z".into(),
             purge_after: "2026-10-27T10:00:00Z".into(),
+            batch: Some("2026-10-20-clean".into()),
             restorable,
         }
+    }
+
+    #[test]
+    fn batch_id_only_accepts_one_batch_directory_under_root() {
+        use std::path::Path;
+        let root = Path::new("/tmp/quarantine");
+        assert_eq!(
+            batch_id(root, &root.join("2026-10-20-clean").join("42-cache")),
+            Some("2026-10-20-clean".into())
+        );
+        for invalid in [
+            root.join("42-cache"),
+            root.join("batch").join("nested").join("42-cache"),
+            root.join("..")
+                .join("outside")
+                .join("batch")
+                .join("42-cache"),
+            Path::new("/tmp/other/batch/42-cache").to_path_buf(),
+        ] {
+            assert_eq!(
+                batch_id(root, &invalid),
+                None,
+                "不应把 {invalid:?} 说成真实批次"
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_rows_keep_original_row_indices_and_unknown_records_separate() {
+        let mut rows = vec![row(1, true), row(2, true), row(3, false), row(4, true)];
+        rows[1].batch = Some("second-batch".into());
+        rows[2].batch = None;
+        let grouped = grouped_rows(&rows);
+        assert_eq!(
+            grouped,
+            vec![
+                GroupedRow::Header {
+                    first: 0,
+                    count: 2,
+                    bytes: 200
+                },
+                GroupedRow::Item(0),
+                GroupedRow::Item(3),
+                GroupedRow::Header {
+                    first: 1,
+                    count: 1,
+                    bytes: 100
+                },
+                GroupedRow::Item(1),
+                GroupedRow::Header {
+                    first: 2,
+                    count: 1,
+                    bytes: 100
+                },
+                GroupedRow::Item(2),
+            ]
+        );
     }
 
     #[test]

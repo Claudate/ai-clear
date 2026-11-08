@@ -307,14 +307,26 @@ fn uid() -> String {
 /// （换了机器、被系统禁用、bootstrap 失败），而界面若把它显示成「已启用」，
 /// 用户会等一个永远不会来的清理。
 pub fn is_loaded() -> bool {
+    matches!(load_status(), Ok(true))
+}
+
+/// 同 `is_loaded`，但失败时带回 launchctl 的具体原因，界面能直接展示。
+pub fn load_status() -> Result<bool, String> {
     let target = format!("gui/{}/{}", uid(), LABEL);
-    std::process::Command::new("launchctl")
+    let out = std::process::Command::new("launchctl")
         .args(["print", &target])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .output()
+        .map_err(|e| format!("调用 launchctl 失败：{e}"))?;
+    if out.status.success() {
+        Ok(true)
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            "launchctl print 返回非零，任务未加载".to_string()
+        } else {
+            err
+        })
+    }
 }
 
 /// 安装（或重装）任务。已经加载时先 bootout 再 bootstrap——
@@ -347,9 +359,77 @@ pub fn install(cfg: &ScheduleConfig) -> Result<(), String> {
         .map_err(|e| format!("调用 launchctl 失败：{e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(format!("launchctl 没有接受这个任务：{err}"));
+        return Err(explain_bootstrap_failure(&err, &path));
+    }
+    // bootstrap 返回成功不等于任务真的在跑：同一 label 冲突、plist 被系统拦截
+    // 都可能让 launchd 静默丢弃。装载后必须查一次真实状态，否则界面会出现
+    // 「已启用但系统里没加载」的假象。
+    if !is_loaded() {
+        let reason = load_status()
+            .err()
+            .unwrap_or_else(|| "任务未加载".to_string());
+        return Err(format!("launchctl 装载后任务仍未生效：{reason}"));
     }
     Ok(())
+}
+
+/// 启动时该不该提醒「定时清理配了却不会跑」。
+///
+/// 返回 `Some(话)` 表示要在首页说出来。查不到配置（从没配过）就不提——
+/// 一个从没开过定时清理的人不该在启动时看到一条关于它的警告。
+pub fn startup_health_warning() -> Option<&'static str> {
+    let cfg = load_config().ok()?;
+    let loaded = load_status().is_ok();
+    health_warning(cfg.enabled, loaded)
+}
+
+/// `startup_health_warning` 的判定部分，纯函数。
+///
+/// 抽出来是为了能在不起 launchd、不碰真实配置的前提下测这四种组合。
+/// 真正的 `load_*` 调用留在外层，测试只对着这张真值表。
+pub fn health_warning(enabled: bool, loaded: bool) -> Option<&'static str> {
+    if enabled && !loaded {
+        Some(
+            "定时清理配置为已启用，但系统里没有加载这个任务，到点不会执行。\
+             打开「自动清理」重新保存一次即可重新安装。",
+        )
+    } else {
+        None
+    }
+}
+
+/// 把 `launchctl bootstrap` 的失败翻译成「为什么 + 怎么办」。
+///
+/// 这个函数存在的唯一理由是那句 `Bootstrap failed: 5: Input/output error`：
+/// 它对用户没有任何信息量，看到它的人只会以为软件坏了。实际的成因很集中，
+/// 逐条对上就能告诉用户下一步该做什么。
+fn explain_bootstrap_failure(raw: &str, plist: &Path) -> String {
+    let low = raw.to_lowercase();
+    let hint = if low.contains("input/output error") {
+        format!(
+            "系统拒绝了这份定时任务（launchctl 报 I/O 错误）。常见原因是这份 plist \
+             已经躺在 {p} 里但从未被加载过、或者系统里的服务库暂时不接受新任务。\
+             先试：关掉这个开关再打开一次；仍然不行就重启一次 Mac，再回来保存。",
+            p = plist.display()
+        )
+    } else if low.contains("already loaded") || low.contains("service already") {
+        "这个定时任务已经加载着了，不需要再装一次。先点「刷新状态」确认，\
+         要换时间直接保存即可（保存会先卸旧再装新）。"
+            .to_string()
+    } else if low.contains("no such file") || low.contains("not found") {
+        format!(
+            "系统找不到这份 plist（{p}）。点「保存」会重新写一份再装；\
+             仍然失败的话，检查 ~/Library/LaunchAgents 目录是否可写。",
+            p = plist.display()
+        )
+    } else if low.contains("permission") || low.contains("denied") {
+        "系统不允许写入这个用户的定时任务。检查 ~/Library/LaunchAgents 的权限，\
+         或者换用有权限的账户。"
+            .to_string()
+    } else {
+        format!("launchctl 没有接受这个任务：{raw}。可先点「刷新状态」再保存一次。")
+    };
+    format!("安装定时任务失败。{hint}")
 }
 
 pub fn uninstall() -> Result<(), String> {
@@ -737,5 +817,57 @@ verdict = { type = "costly", cost = "recompile", note = "重编" }
         let back: LastRun = serde_json::from_str(&text).unwrap();
         assert_eq!(back.done, 4);
         assert_eq!(back.failures.len(), 1);
+    }
+
+    /// 启动提醒的真值表：只有「说启用了、系统里没加载」才该出声。
+    ///
+    /// 其余三种都不提：没开过的人不该看到关于它的警告，没开也没加载是正常状态，
+    /// 开了也加载了就是一切正常。多说一句就会变成启动噪音。
+    #[test]
+    fn startup_warning_only_fires_when_enabled_but_not_loaded() {
+        let hit = health_warning(true, false).expect("启用了却没加载，必须提醒");
+        assert!(hit.contains("到点不会执行"), "要说清后果：{hit}");
+        assert!(hit.contains("自动清理"), "要指出能修它的页面：{hit}");
+
+        assert!(health_warning(true, true).is_none(), "正常状态不提醒");
+        assert!(health_warning(false, false).is_none(), "没启用不提醒");
+        assert!(health_warning(false, true).is_none(), "没启用不提醒");
+    }
+
+    /// 原始英文异常不能就这样丢给用户。
+    ///
+    /// `Bootstrap failed: 5: Input/output error` 是用户最可能撞见的那一句；
+    /// 单独看它只会以为软件坏了。翻译之后必须说清「为什么」和「下一步做什么」，
+    /// 而且必须带上那份 plist 的真实路径，用户才找得到地方。
+    #[test]
+    fn bootstrap_failures_are_explained_in_chinese() {
+        let plist = std::path::Path::new("/Users/me/Library/LaunchAgents/app.molt.schedule.plist");
+
+        let io = explain_bootstrap_failure("Bootstrap failed: 5: Input/output error", plist);
+        assert!(
+            io.contains("系统拒绝了这份定时任务"),
+            "要说出发生了什么：{io}"
+        );
+        assert!(io.contains("重启"), "要给出下一步：{io}");
+        assert!(
+            io.contains("app.molt.schedule.plist"),
+            "要带上真实路径，否则用户不知道该去看哪份文件：{io}"
+        );
+
+        let dup = explain_bootstrap_failure("service already loaded", plist);
+        assert!(dup.contains("刷新状态"), "已加载时指向「刷新状态」：{dup}");
+
+        let missing = explain_bootstrap_failure("No such file or directory", plist);
+        assert!(
+            missing.contains("保存"),
+            "文件不见了就让他重新保存：{missing}"
+        );
+
+        // 认不出来的原因也要原样保留，不能把它吞掉。
+        let other = explain_bootstrap_failure("weird new error 42", plist);
+        assert!(
+            other.contains("weird new error 42"),
+            "未知原因要原样带上：{other}"
+        );
     }
 }

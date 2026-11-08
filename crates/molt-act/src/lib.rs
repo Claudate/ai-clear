@@ -217,9 +217,22 @@ impl Executor {
     /// `Protected` 一律跳过并记为失败——这不是防御性编程，而是产品承诺：
     /// 「受保护的东西不会被这个工具移动」，用户应该能靠这一点放心按确认。
     pub fn clean(&self, candidates: &[Candidate], confirmation: &Confirmation) -> CleanOutcome {
+        self.clean_with_progress(candidates, confirmation, |_, _| {})
+    }
+
+    /// 和 `clean` 执行相同的动作，并在每个候选项处理或跳过后报告已检查数与总数。
+    /// 回调在执行线程同步调用，跳过项也计入已检查数；它不表示成功清理数。
+    pub fn clean_with_progress(
+        &self,
+        candidates: &[Candidate],
+        confirmation: &Confirmation,
+        mut progress: impl FnMut(usize, usize),
+    ) -> CleanOutcome {
         match self.mode {
-            CleanMode::Quarantine => self.clean_to_quarantine(candidates, confirmation),
-            CleanMode::Delete => self.clean_permanently(candidates, confirmation),
+            CleanMode::Quarantine => {
+                self.clean_to_quarantine(candidates, confirmation, &mut progress)
+            }
+            CleanMode::Delete => self.clean_permanently(candidates, confirmation, &mut progress),
         }
     }
 
@@ -232,6 +245,7 @@ impl Executor {
         &self,
         candidates: &[Candidate],
         confirmation: &Confirmation,
+        progress: &mut impl FnMut(usize, usize),
     ) -> CleanOutcome {
         let now = now_iso8601();
         let mut outcome = CleanOutcome::default();
@@ -242,20 +256,23 @@ impl Executor {
         let mut ordered: Vec<&Candidate> = candidates.iter().collect();
         ordered.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
 
-        for c in ordered {
+        for (index, c) in ordered.into_iter().enumerate() {
             if matches!(c.verdict, Verdict::Protected { .. }) {
                 outcome.failed.push(FailedItem {
                     path: c.path.clone(),
                     reason: "受保护项，已跳过".to_string(),
                 });
+                progress(index + 1, candidates.len());
                 continue;
             }
             if !confirmation.is_accepted(&c.path) {
+                progress(index + 1, candidates.len());
                 continue;
             }
             // 父目录刚被删掉时，子项已经不存在了。这不是失败，
             // 它的空间已经算在父目录那一条里——报失败会让用户以为漏清了。
             if !c.path.exists() && std::fs::symlink_metadata(&c.path).is_err() {
+                progress(index + 1, candidates.len());
                 continue;
             }
 
@@ -280,6 +297,7 @@ impl Executor {
                     reason: e,
                 }),
             }
+            progress(index + 1, candidates.len());
         }
 
         outcome
@@ -290,20 +308,23 @@ impl Executor {
         &self,
         candidates: &[Candidate],
         confirmation: &Confirmation,
+        progress: &mut impl FnMut(usize, usize),
     ) -> CleanOutcome {
         let now = now_iso8601();
         let purge_after = add_days(&now, self.retain_days);
         let mut outcome = CleanOutcome::default();
 
-        for c in candidates {
+        for (index, c) in candidates.iter().enumerate() {
             if matches!(c.verdict, Verdict::Protected { .. }) {
                 outcome.failed.push(FailedItem {
                     path: c.path.clone(),
                     reason: "受保护项，已跳过".to_string(),
                 });
+                progress(index + 1, candidates.len());
                 continue;
             }
             if !confirmation.is_accepted(&c.path) {
+                progress(index + 1, candidates.len());
                 continue;
             }
 
@@ -345,6 +366,7 @@ impl Executor {
                     reason: format!("移动失败：{e}"),
                 }),
             }
+            progress(index + 1, candidates.len());
         }
 
         self.quarantine.tidy_batch();
@@ -946,6 +968,50 @@ mod tests {
     }
 
     #[test]
+    fn delete_progress_counts_processed_and_skipped_candidates() {
+        let base = tmpdir("delete-progress");
+        let target = base.join("cache.bin");
+        let keep = base.join("keep.bin");
+        let later = base.join("later.bin");
+        for path in [&target, &keep, &later] {
+            std::fs::write(path, b"data").unwrap();
+        }
+        let ex = Executor::new(
+            AuditStore::in_memory().unwrap(),
+            Quarantine::new(base.join("q"), "b"),
+            7,
+        )
+        .with_mode(CleanMode::Delete)
+        .with_authorized_root(&base);
+        let item = Candidate::new(&target, ItemKind::File, Verdict::Reclaimable);
+        let protected = Candidate::new(
+            &keep,
+            ItemKind::File,
+            Verdict::Protected {
+                reason: molt_core::ProtectReason::UserRecord,
+            },
+        );
+        let unconfirmed = Candidate::new(&later, ItemKind::File, Verdict::Reclaimable);
+        let candidates = [item.clone(), item.clone(), protected, unconfirmed];
+        let confirmation = Confirmation::new(std::slice::from_ref(&item));
+        let mut observed = Vec::new();
+        let outcome = ex.clean_with_progress(&candidates, &confirmation, |done, total| {
+            if done == 1 {
+                assert!(!target.exists(), "进度只能在文件删除后推进");
+            }
+            observed.push((done, total));
+        });
+
+        assert_eq!(observed, [(1, 4), (2, 4), (3, 4), (4, 4)]);
+        assert_eq!(outcome.deleted.len(), 1);
+        assert_eq!(outcome.failed.len(), 1);
+        assert!(!target.exists());
+        assert!(keep.exists());
+        assert!(later.exists());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn delete_mode_removes_files_and_reports_released_bytes() {
         let base = tmpdir("delete");
         let cache = base.join("cache");
@@ -999,6 +1065,43 @@ mod tests {
 
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&other).ok();
+    }
+
+    #[test]
+    fn quarantine_progress_counts_processed_and_skipped_candidates() {
+        let (base, ex) = setup("quarantine-progress");
+        let target = base.join("cache.bin");
+        let keep = base.join("keep.bin");
+        let later = base.join("later.bin");
+        for path in [&target, &keep, &later] {
+            std::fs::write(path, b"data").unwrap();
+        }
+        let item = Candidate::new(&target, ItemKind::File, Verdict::Reclaimable);
+        let protected = Candidate::new(
+            &keep,
+            ItemKind::File,
+            Verdict::Protected {
+                reason: molt_core::ProtectReason::UserRecord,
+            },
+        );
+        let unconfirmed = Candidate::new(&later, ItemKind::File, Verdict::Reclaimable);
+        let candidates = [item.clone(), protected, unconfirmed];
+        let confirmation = Confirmation::new(std::slice::from_ref(&item));
+        let mut observed = Vec::new();
+        let outcome = ex.clean_with_progress(&candidates, &confirmation, |done, total| {
+            if done == 1 {
+                assert!(!target.exists(), "进度只能在文件移入临时空间后推进");
+            }
+            observed.push((done, total));
+        });
+
+        assert_eq!(observed, [(1, 3), (2, 3), (3, 3)]);
+        assert_eq!(outcome.moved.len(), 1);
+        assert_eq!(outcome.failed.len(), 1);
+        assert!(!target.exists());
+        assert!(keep.exists());
+        assert!(later.exists());
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

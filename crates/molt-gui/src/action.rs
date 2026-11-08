@@ -16,7 +16,6 @@
 //! 因为页面函数拿到的是 `&AppState`。
 
 use crate::state::{AppState, Filter, NextStep, Page, Priority, StatusMessage};
-use std::path::PathBuf;
 
 /// 界面能发出的全部动作。
 ///
@@ -52,6 +51,12 @@ pub enum Action {
     SelectSuggested,
     /// 当前筛选下能动手的全部选中
     SelectAllVisible,
+    /// 整组勾上或清掉某一档（分组标题上的三态框）
+    ToggleGroup(Priority),
+    /// 展开或收起项目/工具子组。
+    ToggleSubgroupOpen(Priority, String),
+    /// 子组范围内全选或清空；状态层会再次核对路径的判定与筛选。
+    ToggleSubgroupSelection(Priority, Vec<String>),
     ClearSelection,
 
     // ---- 清理与确认 ----
@@ -86,6 +91,8 @@ pub enum Action {
     SetHistoryFilter(crate::state::HistoryFilter),
 
     // ---- 设置 ----
+    /// 大/中/小字号；非法档位忽略，默认仍为大字号。
+    SetFontScale(u8),
     ToggleSettingsAdvanced,
     SetKeyDraft(String),
     ClearKeyDraft,
@@ -121,44 +128,27 @@ pub enum Action {
     /// 让 AI 解释这次扫描
     Analyze,
 
-    // ---- 卸载 ----
-    /// 重新枚举已装应用与残留
-    LoadApps,
-    /// 选中某个应用：网格里单击它，右侧浮窗列出它的全部文件。
-    /// 不卸载、不启动，只是「看它有哪些文件」。
-    OpenApp(String),
-    /// 关掉浮窗（浮窗右上角那个叉，或换了页面）
-    CloseApp,
-    /// 真的启动这个应用（双击图标）——与 `OpenApp` 的「选中」完全是两件事，
-    /// 所以那条的语义在注释里写明。
-    LaunchApp(String),
-    /// 在访达里定位到这个应用（选中它，而不是打开它）
-    RevealApp(String),
     /// 打开 / 关闭首页条目的详情抽屉（只读的简介面板）
     OpenDetail(String),
     CloseDetail,
-    /// 右键菜单里的「卸载」：把这个应用的本体与残留一起装进待确认批次。
-    /// 残留还没扫过时先扫，扫完才弹确认框——否则「卸干净」只卸掉一个 `.app`。
-    PrepareUninstall(String),
-    CancelUninstall,
-    /// 确认框按了确定
-    RunUninstall,
-
-    // ---- 工具 ----
+    /// 在访达里定位这个路径（选中它，而不是打开它）
+    RevealInFinder(String),
     /// 在访达里打开临时空间
     RevealQuarantine,
 
-    // ---- 新建文件夹 / 文件 ----
-    OpenCreate,
-    CloseCreate,
-    SetCreateRoot(String),
-    SetCreateLines(String),
-    SetCreateTab(crate::state::CreateTab),
-    /// 切页签时把预设填进去（只填空的，不覆盖用户已经写的）
-    ApplyCreatePreset(crate::state::CreateTab),
-    RunCreate,
-    /// 撤销最近一次创建
-    UndoCreate,
+    // ---- 扫描控制 ----
+    /// 暂停当前扫描：后台在下一个检查点停下，已完成的进度保留。
+    PauseScan,
+    /// 从暂停处继续扫描。
+    ResumeScan,
+    /// 取消当前扫描：任务结束，不能继续。
+    CancelScan,
+
+    // ---- 重复文件 ----
+    /// 启动重复文件检测（后台任务，只读）。
+    StartDuplicateScan,
+    /// 把路径复制到剪贴板。
+    CopyPath(String),
 }
 
 /// `apply` 判断出「这件事要真的去跑」时追加的意图。
@@ -180,6 +170,11 @@ pub enum Effect {
     ReloadQuarantine,
     ReloadHistory,
     ReloadAiConfig,
+    /// 重读规则库（用户可能往 rules 目录里加了规则）。
+    ///
+    /// 与 `ReloadAiConfig` 分开：那个只读 ai.toml，规则库是另一份文件、
+    /// 另一套解析，合成一个 Effect 会让「重新读取配置」做什么变得含糊。
+    ReloadRules,
     /// AI 配置变了，需要写回 ai.toml
     SaveAiConfig,
     /// 把界面上的密钥落盘
@@ -195,21 +190,14 @@ pub enum Effect {
     RefreshDisk,
     /// 回收已到期的隔离项
     CollectExpired,
-    /// 枚举已装应用与残留（读 /Applications 与 ~/Library，纯只读但要遍历目录）
-    ScanApps,
-    /// 盘点一个应用的残留（只在点开它时才启动）
-    ScanLeftovers(String),
-    /// 把一个应用（本体 + 残留）移入临时空间
-    Uninstall(Box<crate::state::PendingClean>),
-    /// 启动一个已装应用（`open`，不动任何数据）
-    LaunchApp(String),
-    /// 在访达里选中一个已装应用（`open -R`）
-    RevealApp(String),
+    /// 在访达里选中一个路径（`open -R`）
+    RevealInFinder(String),
     /// 打开临时空间的目录（`open` 是只读的，不动任何内容）
     RevealQuarantine,
-    /// 落盘一批新建
-    Create(Box<molt_act::CreatePlan>),
-    UndoCreate(String),
+    /// 启动重复文件检测。
+    ScanDuplicates,
+    /// 把路径写入系统剪贴板。
+    CopyPath(String),
 }
 
 /// 唯一改状态的地方。纯函数：只读 `state`、只写 `state`，返回要执行的动作。
@@ -268,16 +256,7 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
         //
         // 执行期间改勾选会让用户以为这一批变了，而实际执行的是按下确认那一刻
         // 的清单。守卫放这里，所有入口自动都守住了。
-        Action::ToggleCheck(path) => {
-            if state.can_select() {
-                // `remove` 的返回值就是「原本在不在」：原来在就已经删掉了，
-                // 原来不在就补上。不能先删再查，那样每次都会补上。
-                if !state.checked.remove(&path) {
-                    state.checked.insert(path);
-                }
-                state.pending_clean = None;
-            }
-        }
+        Action::ToggleCheck(path) => state.toggle(&path),
         Action::SelectReclaimable => {
             if state.can_select() {
                 state.select_reclaimable();
@@ -293,6 +272,13 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
                 state.select_all_visible();
             }
         }
+        Action::ToggleGroup(pr) => {
+            if state.can_select() {
+                state.toggle_group(pr);
+            }
+        }
+        Action::ToggleSubgroupOpen(pr, key) => state.toggle_subgroup_open(pr, key),
+        Action::ToggleSubgroupSelection(pr, paths) => state.toggle_subgroup_selection(pr, &paths),
         Action::ClearSelection => {
             if state.can_select() {
                 state.clear_selection();
@@ -353,9 +339,23 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.pending_purge = state.pending_purge_from_checked();
         }
         Action::PreparePurgeOne(id) => {
-            state.quarantine_checked.clear();
-            state.quarantine_checked.insert(id);
-            state.pending_purge = state.pending_purge_from_checked();
+            // 只构造一条独立的待确认批次，**不动** `quarantine_checked`。
+            //
+            // 以前这里把整份勾选换成这一条：用户勾了 6 项、顺手点了某行的
+            // 「彻底删除…」，结果确认框里只有 1 项，之前勾的 5 个悄悄没了，
+            // 连取消确认框也换不回来。
+            state.pending_purge = state
+                .quarantine
+                .iter()
+                .find(|r| r.id == id && r.restorable)
+                .map(|r| crate::state::PendingPurge {
+                    bytes: r.bytes,
+                    items: vec![crate::state::PendingPurgeItem {
+                        id: r.id,
+                        original: std::path::PathBuf::from(&r.original),
+                        bytes: r.bytes,
+                    }],
+                });
         }
         Action::CancelPendingPurge => state.pending_purge = None,
         Action::RunPendingPurge => {
@@ -368,6 +368,11 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::SetHistoryFilter(f) => state.history_filter = f,
 
         // ---- 设置 ----
+        Action::SetFontScale(index) => {
+            if let Some(scale) = crate::theme::Theme::scale_for_index(index) {
+                state.display_scale = scale;
+            }
+        }
         Action::ToggleSettingsAdvanced => state.settings_advanced = !state.settings_advanced,
         // 密钥只在内存里，保存后立即清空——它绝不能跟着窗口状态被持久化。
         Action::SetKeyDraft(s) => state.key_draft = s,
@@ -379,12 +384,18 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::SetAiProvider(id) => {
             if !state.is_busy() {
+                // 换服务时把那半截密钥清掉：它是上一家服务填的，留着
+                // 会让「保存密钥」把 A 家的 key 写进 B 家的配置里。
+                if state.ai.config.active_provider != id {
+                    state.key_draft.clear();
+                }
                 state.ai.config.set_provider(&id);
                 return vec![Effect::SaveAiConfig];
             }
         }
         Action::SetAiModel(id) => {
             if !state.is_busy() {
+                // 同一家服务下换模型，密钥仍属于这家，草稿要留着。
                 state.ai.config.active_model = id;
                 return vec![Effect::SaveAiConfig];
             }
@@ -456,220 +467,45 @@ pub fn apply(state: &mut AppState, action: Action) -> Vec<Effect> {
             }
         }
 
-        Action::ReloadRules => return vec![],
+        Action::ReloadRules => return vec![Effect::ReloadRules],
         Action::Analyze => {
             if state.can_start() {
                 return vec![Effect::Analyze];
             }
         }
 
-        // ---- 卸载 ----
-        Action::LoadApps => {
-            // 扫目录要遍历几百个 .app 与 ~/Library，放在 UI 线程里会卡住窗口。
-            state.uninstall.loading = true;
-            return vec![Effect::ScanApps];
-        }
-        Action::OpenApp(path) => {
-            // 单击 = 选中。浮窗里要能看见「这个应用占了哪些文件、各占多少」，
-            // 而那份清单要残留扫过才有。所以在选中时就按需扫一次，不等点卸载。
-            let same = state.uninstall.open.as_deref() == Some(path.as_str());
-            state.uninstall.open = if same { None } else { Some(path.clone()) };
-            state.uninstall.note = None;
-            if same {
-                // 关掉浮窗：正在为它扫的残留没用了，停掉
-                state.leftover_job = None;
-                state.uninstall.leftovers_loading = None;
-                state.uninstall.pending_uninstall_after_scan = None;
-                return Vec::new();
-            }
-            let loaded = state
-                .uninstall
-                .current()
-                .map(|a| a.leftovers_loaded)
-                .unwrap_or(false);
-            if loaded {
-                state.uninstall.leftovers_loading = None;
-                return Vec::new();
-            }
-            state.uninstall.leftovers_loading = Some(path.clone());
-            // 残留盘点在个别应用上能慢到十分钟，所以它是后台跑的：
-            // 纯函数只表态「需要扫」，怎么扫由 `app.rs` 决定。
-            if state.leftover_job.is_none() {
-                return vec![Effect::ScanLeftovers(path)];
+        // ---- 扫描控制 ----
+        Action::PauseScan => {
+            if let Some(job) = state.job.as_ref() {
+                job.control.pause();
             }
         }
-        Action::CloseApp => {
-            state.uninstall.open = None;
-            state.uninstall.note = None;
-            state.uninstall.leftovers_loading = None;
-            state.uninstall.pending_uninstall_after_scan = None;
-            // 这一轮扫描的结果已经没人要了，别让它回来时改写一个没人看的行
-            state.leftover_job = None;
-        }
-        Action::PrepareUninstall(path) => {
-            // 右键菜单里的卸载。卸载永远覆盖本体 + 全部残留（默认全勾的语义），
-            // 用户没地方逐项取消——所以残留必须先知道齐不齐。
-            let loaded = state
-                .uninstall
-                .apps
-                .iter()
-                .find(|a| a.path == path)
-                .map(|a| a.leftovers_loaded)
-                .unwrap_or(false);
-            if !loaded {
-                // 还没扫过残留：先去扫，扫完再回来装批次。
-                // 否则用户以为卸干净了，而实际只卸掉了一个 `.app`。
-                state.uninstall.pending_uninstall_after_scan = Some(path.clone());
-                if state.leftover_job.is_none() {
-                    state.uninstall.leftovers_loading = Some(path.clone());
-                    return vec![Effect::ScanLeftovers(path)];
-                }
-                // 别的应用的残留正在扫：等它回来，这里不再起第二个任务
-                return Vec::new();
+        Action::ResumeScan => {
+            if let Some(job) = state.job.as_ref() {
+                job.control.resume();
             }
-            state.pending_clean = pending_uninstall(&state.uninstall, &path);
         }
-        Action::CancelUninstall => state.pending_clean = None,
-        Action::RunUninstall => {
-            // 卸载**不能**走 `start_clean`：它会拿首页扫描结果里的勾选再过滤一遍批次，
-            // 而应用本体与残留根本不在扫描清单里——那样得到的永远是空批次，
-            // 盘上一个字节都不动，界面却像点过了。这里直接把批次交给卸载执行路径。
-            let Some(pending) = state.pending_clean.take() else {
-                return Vec::new();
-            };
-            if !state.can_start() {
-                state.status = Some(crate::state::StatusMessage::warn(
-                    state.activity().blocking_hint().to_string(),
-                ));
-                return Vec::new();
+        Action::CancelScan => {
+            if let Some(job) = state.job.as_ref() {
+                job.control.cancel();
             }
-            state.uninstall.removing = pending.items.first().map(|i| i.path.display().to_string());
-            return vec![Effect::Uninstall(Box::new(pending))];
         }
+        Action::StartDuplicateScan => {
+            if state.duplicate_job.is_none() {
+                return vec![Effect::ScanDuplicates];
+            }
+        }
+        Action::CopyPath(path) => return vec![Effect::CopyPath(path)],
 
         // ---- 工具 ----
+        Action::RevealInFinder(path) => return vec![Effect::RevealInFinder(path)],
         Action::RevealQuarantine => return vec![Effect::RevealQuarantine],
-        Action::LaunchApp(path) => return vec![Effect::LaunchApp(path)],
-        Action::RevealApp(path) => return vec![Effect::RevealApp(path)],
 
         // ---- 详情抽屉 ----
         Action::OpenDetail(path) => state.detail_path = Some(path),
         Action::CloseDetail => state.detail_path = None,
-
-        // ---- 新建 ----
-        Action::OpenCreate => {
-            if state.create.root.is_empty() {
-                // 默认落在家目录：新建一个空文件夹不会毁掉什么，
-                // 而让用户从零手打一条绝对路径是最容易出错的起点。
-                state.create.root = home_with_slash(&state.home);
-            }
-            state.create.open = true;
-            state.create.error = None;
-        }
-        Action::CloseCreate => {
-            state.create.open = false;
-            state.create.error = None;
-        }
-        Action::SetCreateRoot(s) => state.create.root = s,
-        Action::SetCreateLines(s) => state.create.lines = s,
-        Action::SetCreateTab(tab) => {
-            state.create.tab = tab;
-            // 切页签时若内容还是空的，就把该页签的预设填上；
-            // 已有内容一律不动——用户写的东西不能被切换页签抹掉。
-            if state.create.lines.trim().is_empty() {
-                state.create.lines = create_preset(tab);
-            }
-        }
-        Action::ApplyCreatePreset(tab) => {
-            state.create.tab = tab;
-            state.create.lines = create_preset(tab);
-        }
-        Action::RunCreate => {
-            if state.is_busy() {
-                state.status = Some(crate::state::StatusMessage::warn(
-                    state.activity().blocking_hint().to_string(),
-                ));
-            } else {
-                let plan = state.create.plan(&state.home);
-                if plan.will_create() == 0 {
-                    state.create.error = Some(if plan.items.is_empty() {
-                        "还没有要创建的东西：每行写一条路径，行尾加 / 表示文件夹".to_string()
-                    } else {
-                        "这一批里没有可创建的项：都已存在，或都被拒绝了".to_string()
-                    });
-                } else {
-                    state.create.error = None;
-                    return vec![Effect::Create(Box::new(plan))];
-                }
-            }
-        }
-        Action::UndoCreate => {
-            if let Some(batch) = state.create.last.as_ref().map(|r| r.batch.clone()) {
-                if state
-                    .create
-                    .last
-                    .as_ref()
-                    .is_some_and(|r| !r.created.is_empty())
-                {
-                    return vec![Effect::UndoCreate(batch)];
-                }
-            }
-        }
     }
     Vec::new()
-}
-
-/// 家目录 + 结尾斜杠，给输入框一个能直接接相对路径的起点。
-fn home_with_slash(home: &str) -> String {
-    if home.ends_with('/') {
-        home.to_string()
-    } else {
-        format!("{home}/")
-    }
-}
-
-/// 三个页签各自的起点内容。
-///
-/// 预设只写「最少够用」的那几项：一次塞二十个目录，用户要先删掉一半才敢建。
-fn create_preset(tab: crate::state::CreateTab) -> String {
-    use crate::state::CreateTab;
-    match tab {
-        CreateTab::Skeleton => "src/\ntests/\nREADME.md\n".to_string(),
-        CreateTab::Dirs => "".to_string(),
-        CreateTab::Files => "".to_string(),
-    }
-}
-
-/// 把卸载页勾掉的项装成一次待确认批次。
-///
-/// 判定统一写成「有代价」而不是「可回收」：卸载掉的东西不会自动重建。
-/// 这个档位只影响展示口径，不影响隔离与还原。
-fn pending_uninstall(
-    panel: &crate::state::UninstallPanel,
-    path: &str,
-) -> Option<crate::state::PendingClean> {
-    let app = panel.apps.iter().find(|a| a.path == path)?;
-    // 本体 + 全部残留。不再看勾选：右键菜单只有「卸载」一项，
-    // 它承诺的就是「卸干净」。想留配置的用户没有按钮可点，所以这里必须全带。
-    let mut items: Vec<crate::state::PendingItem> = Vec::with_capacity(app.leftovers.len() + 1);
-    items.push(crate::state::PendingItem {
-        path: PathBuf::from(&app.path),
-        bytes: app.bytes,
-        note: Some(format!("{} 的应用本体", app.name)),
-    });
-    for l in &app.leftovers {
-        items.push(crate::state::PendingItem {
-            path: PathBuf::from(&l.path),
-            bytes: l.bytes,
-            note: Some(l.category.to_string()),
-        });
-    }
-    let bytes = items.iter().map(|i| i.bytes).sum();
-    Some(crate::state::PendingClean {
-        mode: molt_act::CleanMode::Quarantine,
-        items,
-        bytes,
-    })
 }
 
 /// 切页并回报该页需要的加载。
@@ -683,19 +519,6 @@ fn go_page(state: &mut AppState, page: Page) -> Vec<Effect> {
     state.page = page;
     match page {
         Page::Quarantine => vec![Effect::ReloadQuarantine],
-        Page::Uninstall => {
-            // 这一页只在**第一次**进入时列一遍应用。
-            //
-            // 以前每次切回来都重新扫：遍历 /Applications、再逐个 bundle 递归量体积，
-            // 用户只是从别的页签点回来却要等几秒，看到的是「正在列出应用…」。
-            // 清单不会自己变——真变了（装了/卸了应用）由「重新扫描」负责。
-            if state.uninstall.listed_at.is_some() || !state.uninstall.apps.is_empty() {
-                Vec::new()
-            } else {
-                state.uninstall.loading = true;
-                vec![Effect::ScanApps]
-            }
-        }
         Page::History => vec![Effect::ReloadHistory],
         Page::Automation => {
             state.auto.loaded = false;
@@ -703,8 +526,6 @@ fn go_page(state: &mut AppState, page: Page) -> Vec<Effect> {
             vec![Effect::EnsureAutoLoaded]
         }
         Page::Settings => vec![Effect::ReloadAiConfig],
-        // 工具页只是一组入口，进页不读任何盘：每个工具按下去时各自发起动作。
-        Page::Tools => Vec::new(),
         Page::Workbench => Vec::new(),
     }
 }
@@ -731,8 +552,7 @@ pub fn warn(state: &mut AppState, text: impl Into<String>) {
     state.status = Some(StatusMessage::warn(text));
 }
 
-/// 受保护项与「建议保留」永远不进勾选。这是整套界面最硬的一条约束，
-/// 所以给它一个具名函数，测试直接对着它断言。
+/// 受保护项永远不能勾选；AI 建议保留的本地可回收项仍能由用户决定。
 pub fn is_selectable(state: &AppState, path: &str) -> bool {
     let Some(r) = &state.result else {
         return false;
@@ -740,7 +560,7 @@ pub fn is_selectable(state: &AppState, path: &str) -> bool {
     r.items
         .iter()
         .find(|c| c.path.display().to_string() == path)
-        .map(|c| state.priority_of(c).selectable())
+        .map(AppState::item_actionable)
         .unwrap_or(false)
 }
 
@@ -752,7 +572,6 @@ pub fn count_of(state: &AppState, p: Priority) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::CreateTab;
     use crate::worker::ScanResult;
     use molt_core::{Candidate, CostKind, ItemKind, ProtectReason, RebuildCost, Verdict};
     use std::sync::Arc;
@@ -771,6 +590,28 @@ mod tests {
             from_cache: false,
         }));
         s
+    }
+
+    /// 占住「正在还原」这个活动位，供互斥相关的断言使用。
+    ///
+    /// 自己建一个临时目录里的空审计库，**不碰真实 home**：以前这里直接
+    /// `AuditStore::open(paths::audit_db())`，跑测试就会在用户真正的
+    /// 应用数据目录里建库。
+    fn occupy_restore(s: &mut AppState) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "molt-occupy-restore-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let store = molt_act::AuditStore::open(&dir.join("audit.db")).expect("建审计库");
+        let q = molt_act::Quarantine::new(dir.join("q"), "restore");
+        // 空 id 列表：任务立刻跑完，但 `restore_job` 在这一帧仍是非 None，
+        // 互斥闸门（`can_start` / `can_select`）照常生效。
+        s.restore_job = Some(crate::worker::RestoreJob::start(Vec::new(), store, q));
     }
 
     fn protected() -> Verdict {
@@ -821,53 +662,6 @@ mod tests {
         assert!(fx.is_empty());
     }
 
-    #[test]
-    fn returning_to_uninstall_reuses_the_list_instead_of_rescanning() {
-        // 卸载页每次切回来都重新遍历 /Applications、重测每个 bundle 的体积，
-        // 用户只是从别的页签点回来却要等几秒。清单列过一次就该复用。
-        let mut s = AppState::new("/Users/me".into());
-
-        // 第一次进入：该扫
-        let fx = apply(&mut s, Action::GoPage(Page::Uninstall));
-        assert!(
-            matches!(fx.as_slice(), [Effect::ScanApps]),
-            "第一次进入要列出应用，实际 {fx:?}"
-        );
-        assert!(s.uninstall.loading, "扫描期间要显示「正在列出应用…」");
-
-        // 扫描结束（清单 + 时间戳都落下了）
-        s.uninstall.loading = false;
-        s.uninstall.apps.push(crate::state::AppRow {
-            name: "Demo".into(),
-            path: "/Applications/Demo.app".into(),
-            bundle_id: None,
-            bytes: 1,
-            bytes_known: true,
-            leftovers: Vec::new(),
-            leftover_bytes: 0,
-            icon_file: None,
-            leftovers_loaded: false,
-        });
-        s.uninstall.listed_at = Some(std::time::SystemTime::now());
-
-        // 离开再回来：不该再扫一次
-        apply(&mut s, Action::GoPage(Page::Workbench));
-        let fx = apply(&mut s, Action::GoPage(Page::Uninstall));
-        assert!(fx.is_empty(), "切回卸载页不该重扫，实际 {fx:?}");
-        assert!(!s.uninstall.loading, "复用清单时不该进 loading 态");
-        assert_eq!(s.uninstall.apps.len(), 1, "已有清单要留着");
-    }
-
-    #[test]
-    fn explicit_rescan_still_works_after_the_list_is_cached() {
-        // 缓存不能把「重新扫描」也一起挡掉——装了新应用就是这个入口。
-        let mut s = AppState::new("/Users/me".into());
-        s.uninstall.listed_at = Some(std::time::SystemTime::now());
-        let fx = apply(&mut s, Action::LoadApps);
-        assert!(matches!(fx.as_slice(), [Effect::ScanApps]), "实际 {fx:?}");
-        assert!(s.uninstall.loading);
-    }
-
     // ---- 勾选：这套重构要守住的核心约束 ----
 
     #[test]
@@ -892,10 +686,80 @@ mod tests {
     }
 
     #[test]
+    fn subgroup_actions_keep_protected_and_other_rows_untouched() {
+        let mut s = state_with(vec![
+            cand("/a", 1, Verdict::Reclaimable),
+            cand("/b", 2, Verdict::Reclaimable),
+            cand("/k", 3, protected()),
+        ]);
+        s.clear_selection();
+        let requested = vec!["/a".into(), "/k".into()];
+        apply(
+            &mut s,
+            Action::ToggleSubgroupSelection(Priority::Safe, requested.clone()),
+        );
+        assert!(s.is_checked("/a"));
+        assert!(!s.is_checked("/b"));
+        assert!(!s.is_checked("/k"));
+        apply(
+            &mut s,
+            Action::ToggleSubgroupSelection(Priority::Safe, requested),
+        );
+        assert_eq!(s.checked_count(), 0);
+
+        let key = "project:p".to_string();
+        apply(
+            &mut s,
+            Action::ToggleSubgroupOpen(Priority::Safe, key.clone()),
+        );
+        assert!(s.collapsed_groups.contains(&(Priority::Safe, key.clone())));
+        apply(
+            &mut s,
+            Action::ToggleSubgroupOpen(Priority::Safe, key.clone()),
+        );
+        assert!(!s.collapsed_groups.contains(&(Priority::Safe, key)));
+
+        occupy_restore(&mut s);
+        apply(
+            &mut s,
+            Action::ToggleSubgroupSelection(Priority::Safe, vec!["/b".into()]),
+        );
+        assert!(!s.is_checked("/b"), "执行期间不能改变子组选择");
+    }
+
+    #[test]
+    fn ai_keep_is_manual_choice_but_protected_items_stay_locked() {
+        let mut s = state_with(vec![
+            cand("/a", 10, Verdict::Reclaimable),
+            cand("/k", 10, protected()),
+        ]);
+        s.ai.safe.insert("/a".into(), false);
+        s.filter = Filter::Protected;
+        s.clear_selection();
+        assert_eq!(
+            s.group_check(Priority::Keep),
+            crate::components::checkbox::TriState::Unchecked
+        );
+        apply(&mut s, Action::ToggleGroup(Priority::Keep));
+        assert!(s.is_checked("/a"));
+        assert!(!s.is_checked("/k"));
+        apply(&mut s, Action::ToggleGroup(Priority::Keep));
+        assert_eq!(s.checked_count(), 0);
+        apply(
+            &mut s,
+            Action::ToggleSubgroupSelection(Priority::Keep, vec!["/a".into(), "/k".into()]),
+        );
+        assert!(s.is_checked("/a"));
+        assert!(!s.is_checked("/k"));
+        apply(&mut s, Action::ToggleCheck("/k".into()));
+        assert!(!s.is_checked("/k"));
+    }
+
+    #[test]
     fn selection_is_frozen_while_cleaning() {
         // 执行期间改勾选会让用户以为这一批变了，而实际执行的是按下确认那一刻的清单。
         let mut s = state_with(vec![cand("/a", 1, Verdict::Reclaimable)]);
-        s.restoring = Some(1); // 占住活动，走 is_busy 那条路
+        occupy_restore(&mut s); // 占住活动，走 is_busy 那条路
         assert!(!s.can_select());
 
         apply(&mut s, Action::ToggleCheck("/a".into()));
@@ -978,7 +842,7 @@ mod tests {
         let fx = apply(&mut s, Action::FollowNextStep(NextStep::Retry));
         assert!(matches!(fx.as_slice(), [Effect::Scan]));
 
-        s.restoring = Some(1);
+        occupy_restore(&mut s);
         let fx = apply(&mut s, Action::FollowNextStep(NextStep::Retry));
         assert!(fx.is_empty(), "忙碌时不该再起一次扫描");
     }
@@ -993,6 +857,51 @@ mod tests {
         assert_eq!(s.key_draft, "sk-secret");
         apply(&mut s, Action::ClearKeyDraft);
         assert!(s.key_draft.is_empty());
+    }
+
+    /// 换服务必须清掉上一家的密钥草稿，否则「保存密钥」会把 A 家的 key
+    /// 写进 B 家的配置里。同一家服务下换模型则要留着。
+    #[test]
+    fn switching_provider_drops_the_previous_key_draft() {
+        let mut s = AppState::new("/Users/me".into());
+        s.ai.config.set_provider("deepseek");
+        apply(&mut s, Action::SetKeyDraft("sk-deepseek".into()));
+
+        // 同一家服务下换模型：密钥仍属于这家，不能清
+        apply(&mut s, Action::SetAiModel("deepseek-chat".into()));
+        assert_eq!(
+            s.key_draft, "sk-deepseek",
+            "同服务换模型不该清掉正在填的密钥"
+        );
+
+        apply(&mut s, Action::SetAiProvider("openrouter".into()));
+        assert!(
+            s.key_draft.is_empty(),
+            "换到别家服务后，上一家填的密钥不能留在输入框里"
+        );
+    }
+
+    /// 字号三档：点哪档就立刻改显示档位，越界的编号忽略。
+    /// 用户明确要求默认落在最大档，这里一并锁住。
+    #[test]
+    fn font_scale_switches_all_three_choices() {
+        let mut s = AppState::new("/Users/me".into());
+        let large = s.display_scale;
+        assert!(
+            (large - 1.4).abs() < 0.01,
+            "默认必须是大字号档，实际 {large}"
+        );
+
+        apply(&mut s, Action::SetFontScale(2));
+        assert!((s.display_scale - 1.0).abs() < 0.01, "第三档是标准字号");
+        apply(&mut s, Action::SetFontScale(1));
+        assert!((s.display_scale - 1.2).abs() < 0.01, "第二档是中字号");
+        apply(&mut s, Action::SetFontScale(0));
+        assert!((s.display_scale - 1.4).abs() < 0.01, "第一档是大字号");
+
+        let before = s.display_scale;
+        apply(&mut s, Action::SetFontScale(9));
+        assert_eq!(s.display_scale, before, "越界的编号要忽略");
     }
 
     // ---- 自动化草稿 ----
@@ -1033,11 +942,23 @@ mod tests {
             [Effect::SaveApiKey]
         ));
 
-        s.restoring = Some(1);
+        occupy_restore(&mut s);
         assert!(
             apply(&mut s, Action::SaveApiKey).is_empty(),
             "忙碌时不该落盘"
         );
+    }
+
+    #[test]
+    fn font_scale_defaults_to_large_and_rejects_unknown_choice() {
+        let mut state = AppState::new("/Users/me".into());
+        assert_eq!(state.display_scale, crate::theme::Theme::DEFAULT_SCALE);
+        apply(&mut state, Action::SetFontScale(2));
+        assert_eq!(state.display_scale, 1.0);
+        apply(&mut state, Action::SetFontScale(9));
+        assert_eq!(state.display_scale, 1.0);
+        apply(&mut state, Action::SetFontScale(0));
+        assert_eq!(state.display_scale, crate::theme::Theme::DEFAULT_SCALE);
     }
 
     #[test]
@@ -1060,6 +981,7 @@ mod tests {
             bytes: 1024,
             at: "2026-10-20T10:00:00Z".into(),
             purge_after: "2026-10-27T10:00:00Z".into(),
+            batch: None,
             restorable,
         }
     }
@@ -1098,190 +1020,13 @@ mod tests {
         let mut s = AppState::new("/Users/me".into());
         s.quarantine = vec![qrow(1, true)];
         s.quarantine_checked = [1].into_iter().collect();
-        s.restoring = Some(9);
+        occupy_restore(&mut s);
 
         let fx = apply(&mut s, Action::RestoreSelected);
         assert!(fx.is_empty(), "忙碌时不该产生还原批次");
         assert!(s.status.is_some(), "要告诉用户为什么没动");
     }
 
-    // ---- 卸载 ----
-
-    fn uninstall_state() -> AppState {
-        let mut s = AppState::new("/Users/me".into());
-        s.uninstall.apps = vec![crate::state::AppRow {
-            name: "Demo".into(),
-            path: "/Applications/Demo.app".into(),
-            bundle_id: Some("com.example.demo".into()),
-            bytes: 1_000,
-            bytes_known: true,
-            leftovers: vec![crate::state::LeftoverRow {
-                path: "/Users/me/Library/Caches/com.example.demo".into(),
-                display: "~/Library/Caches/com.example.demo".into(),
-                category: "缓存",
-                bytes: 200,
-                needs_admin: false,
-                unmeasured: false,
-            }],
-            leftover_bytes: 200,
-            icon_file: None,
-            // 夹具的残留是现成的，等同于「已经扫过」
-            leftovers_loaded: true,
-        }];
-        s
-    }
-
-    #[test]
-    fn opening_an_app_only_selects_it() {
-        // 单击只负责选中：浮窗要看的是「有哪些文件」，不是预先勾好一个批次。
-        let mut s = uninstall_state();
-        apply(&mut s, Action::OpenApp("/Applications/Demo.app".into()));
-        assert_eq!(s.uninstall.open.as_deref(), Some("/Applications/Demo.app"));
-        assert!(s.pending_clean.is_none(), "选中不该顺手造出待确认批次");
-        assert_eq!(s.uninstall.file_count(), 2);
-        assert_eq!(s.uninstall.total_bytes(), 1_200);
-    }
-
-    #[test]
-    fn closing_the_window_drops_the_selection_and_the_scan() {
-        let mut s = uninstall_state();
-        apply(&mut s, Action::OpenApp("/Applications/Demo.app".into()));
-        apply(&mut s, Action::CloseApp);
-        assert!(s.uninstall.open.is_none());
-        assert!(s.uninstall.leftovers_loading.is_none());
-    }
-
-    #[test]
-    fn uninstall_right_click_carries_body_and_every_leftover() {
-        // 右键「卸载」承诺的是「卸干净」：本体 + 全部残留一起进批次，
-        // 没有逐项勾选这一步，所以这里断言的是「一条都不落」。
-        let mut s = uninstall_state();
-        apply(
-            &mut s,
-            Action::PrepareUninstall("/Applications/Demo.app".into()),
-        );
-        let p = s.pending_clean.as_ref().expect("应当有确认批次");
-        assert_eq!(p.items.len(), 2);
-        assert_eq!(p.items[0].path.to_string_lossy(), "/Applications/Demo.app");
-        assert_eq!(
-            p.items[1].path.to_string_lossy(),
-            "/Users/me/Library/Caches/com.example.demo"
-        );
-        assert_eq!(p.bytes, 1_200);
-        assert_eq!(p.mode, molt_act::CleanMode::Quarantine, "卸载必须可还原");
-    }
-
-    #[test]
-    fn uninstall_waits_for_leftovers_before_building_the_batch() {
-        // 残留还没扫过就装批次，会只卸掉一个 .app 而用户以为卸干净了。
-        // 这里应当先派一次扫描，并记下「扫完再卸」。
-        let mut s = uninstall_state();
-        s.uninstall.apps[0].leftovers_loaded = false;
-        s.uninstall.apps[0].leftovers.clear();
-        s.uninstall.apps[0].leftover_bytes = 0;
-
-        let fx = apply(
-            &mut s,
-            Action::PrepareUninstall("/Applications/Demo.app".into()),
-        );
-        assert!(
-            matches!(fx.as_slice(), [Effect::ScanLeftovers(p)] if p == "/Applications/Demo.app"),
-            "应当先扫残留，实际：{fx:?}"
-        );
-        assert!(s.pending_clean.is_none(), "扫完之前不该弹确认框");
-        assert_eq!(
-            s.uninstall.pending_uninstall_after_scan.as_deref(),
-            Some("/Applications/Demo.app")
-        );
-    }
-
-    #[test]
-    fn uninstall_with_no_such_app_asks_for_nothing() {
-        let mut s = uninstall_state();
-        apply(
-            &mut s,
-            Action::PrepareUninstall("/Applications/Nope.app".into()),
-        );
-        assert!(s.pending_clean.is_none());
-    }
-
-    #[test]
-    fn running_the_uninstall_hands_the_batch_to_its_own_effect() {
-        // 卸载不能走 `Effect::Clean`：那条路会拿首页扫描结果的勾选再过滤一遍，
-        // 而应用本体与残留都不在那份清单里，批次会被清空成「没有选中任何项」。
-        let mut s = uninstall_state();
-        apply(
-            &mut s,
-            Action::PrepareUninstall("/Applications/Demo.app".into()),
-        );
-        let fx = apply(&mut s, Action::RunUninstall);
-        assert!(
-            matches!(fx.as_slice(), [Effect::Uninstall(p)] if p.items.len() == 2),
-            "应当派出卸载专用效果，实际：{fx:?}"
-        );
-        assert!(s.pending_clean.is_none(), "确认过就不再留着批次");
-        assert_eq!(
-            s.uninstall.removing.as_deref(),
-            Some("/Applications/Demo.app"),
-            "在途标记要记本体路径，完成检测靠它"
-        );
-    }
-
-    // ---- 新建 ----
-
-    #[test]
-    fn opening_create_fills_a_starting_directory() {
-        // 默认落在家目录：让用户从零手打绝对路径是最容易出错的起点。
-        let mut s = AppState::new("/Users/me".into());
-        apply(&mut s, Action::OpenCreate);
-        assert!(s.create.open);
-        assert_eq!(s.create.root, "/Users/me/");
-    }
-
-    #[test]
-    fn switching_tabs_does_not_clobber_what_the_user_wrote() {
-        let mut s = AppState::new("/Users/me".into());
-        apply(&mut s, Action::SetCreateLines("mine/\n".into()));
-        apply(&mut s, Action::SetCreateTab(CreateTab::Files));
-        assert_eq!(s.create.lines, "mine/\n", "已有内容不能被切换页签抹掉");
-        assert_eq!(s.create.tab, CreateTab::Files);
-    }
-
-    #[test]
-    fn switching_tabs_fills_the_preset_when_the_box_is_empty() {
-        let mut s = AppState::new("/Users/me".into());
-        apply(&mut s, Action::SetCreateTab(CreateTab::Skeleton));
-        assert!(s.create.lines.contains("src/"), "空输入时要填上骨架预设");
-    }
-
-    #[test]
-    fn running_create_with_nothing_to_do_reports_instead_of_executing() {
-        // 空输入不该起一次写盘：执行层跑一遍空批次只会开一次库。
-        let mut s = AppState::new("/Users/me".into());
-        apply(&mut s, Action::OpenCreate);
-        let fx = apply(&mut s, Action::RunCreate);
-        assert!(fx.is_empty());
-        assert!(s.create.error.is_some(), "要说明为什么没建");
-    }
-
-    #[test]
-    fn running_create_with_a_plan_emits_the_effect() {
-        let mut s = AppState::new("/Users/me".into());
-        apply(&mut s, Action::OpenCreate);
-        apply(&mut s, Action::SetCreateLines("a/\n".into()));
-        let fx = apply(&mut s, Action::RunCreate);
-        assert!(
-            matches!(fx.as_slice(), [Effect::Create(_)]),
-            "有可建项时要发出写盘意图，实际 {fx:?}"
-        );
-    }
-
-    #[test]
-    fn undo_with_nothing_created_does_nothing() {
-        let mut s = AppState::new("/Users/me".into());
-        let fx = apply(&mut s, Action::UndoCreate);
-        assert!(fx.is_empty());
-    }
     #[test]
     fn purge_batch_keeps_the_confirmed_ids() {
         let row = |id: i64, path: &str| crate::state::QuarantineRow {
@@ -1290,6 +1035,7 @@ mod tests {
             bytes: 10,
             at: "2026-10-20T10:00:00Z".into(),
             purge_after: "2026-10-27T10:00:00Z".into(),
+            batch: None,
             restorable: true,
         };
         let mut s = state_with(vec![]);
@@ -1314,6 +1060,29 @@ mod tests {
             ),
             other => panic!("应是 Effect::Purge，实际 {other:?}"),
         }
+    }
+
+    /// 行内「彻底删除…」只该给这一条一个独立批次。
+    ///
+    /// 以前它把整份勾选替换成这一条：用户勾了 3 项、顺手点了某行的删除，
+    /// 确认框里只剩 1 项，之前勾的都没了，取消也换不回来。
+    #[test]
+    fn purging_one_row_leaves_the_other_checks_alone() {
+        let mut s = state_with(vec![]);
+        s.quarantine = vec![qrow(1, true), qrow(2, true), qrow(3, true)];
+        s.quarantine_checked = [1, 2].into_iter().collect();
+
+        apply(&mut s, Action::PreparePurgeOne(3));
+
+        let pending = s.pending_purge.as_ref().expect("应有一个待确认批次");
+        assert_eq!(pending.ids(), vec![3], "确认框里只该有被点的那一行");
+
+        // 取消之后，原来的勾选必须还在。
+        apply(&mut s, Action::CancelPendingPurge);
+        assert!(s.pending_purge.is_none());
+        let mut left: Vec<i64> = s.quarantine_checked.iter().copied().collect();
+        left.sort();
+        assert_eq!(left, vec![1, 2], "单条删除不该动用户已有的多选");
     }
 
     #[test]

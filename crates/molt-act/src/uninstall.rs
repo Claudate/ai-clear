@@ -607,7 +607,10 @@ mod tests {
         std::os::unix::fs::symlink(&real, apps_dir.join("Linked.app")).unwrap();
 
         let apps = scan_apps(std::slice::from_ref(&apps_dir));
-        let app = apps.iter().find(|a| a.name == "Linked").expect("要列出链接");
+        let app = apps
+            .iter()
+            .find(|a| a.name == "Linked")
+            .expect("要列出链接");
         assert!(
             app.bytes >= 300 * 1024,
             "链接指向的 bundle 有 300 KiB，量到 {} —— 为 0 说明没跟随到目标",

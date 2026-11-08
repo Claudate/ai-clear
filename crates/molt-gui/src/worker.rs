@@ -7,9 +7,178 @@
 //! 这里只负责「跑、报进度、把结果送回来」。判定本身仍然在 `molt-core`。
 
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 
 use molt_core::RuleSet;
+use molt_scan::DuplicateScan;
+
+/// 重复文件扫描进展。
+#[derive(Debug, Clone)]
+pub enum DuplicateProgress {
+    /// 走到哪一步了：阶段 + 已处理 / 总量
+    Working {
+        phase: molt_scan::DuplicatePhase,
+        done: usize,
+        total: usize,
+        files_seen: u64,
+    },
+    Done(Arc<DuplicateScan>),
+    Failed(String),
+}
+
+/// 一次正在跑的重复文件扫描。
+pub struct DuplicateJob {
+    rx: Receiver<DuplicateProgress>,
+    latest: DuplicateProgress,
+    finished: bool,
+}
+
+impl DuplicateJob {
+    /// 开一个后台扫描。立刻返回，不等结果。
+    pub fn start(home: String) -> Self {
+        let (tx, rx) = channel();
+        let fail_tx = tx.clone();
+        std::thread::spawn(move || {
+            let roots = molt_safety::normalize_roots(&[std::path::PathBuf::from(&home)]);
+            let opts = molt_scan::WalkOptions {
+                skip: molt_safety::skip_subtrees(&home),
+                budget: Some(std::time::Duration::from_secs(180)),
+                ..Default::default()
+            };
+            let _ = roots;
+            // 进度推送频度：每 64 次回调推一次。逐次推会把通道堵成瓶颈，
+            // 而几千个文件只有 64 个粒度的进度就已经看不出卡顿了。
+            const TICK_EVERY: usize = 64;
+            let mut ticks = 0usize;
+            let progress_tx = tx.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                molt_scan::find_duplicates_with_progress(
+                    std::path::Path::new(&home),
+                    &opts,
+                    move |t| {
+                        ticks += 1;
+                        if ticks % TICK_EVERY == 0 {
+                            let _ = progress_tx.send(DuplicateProgress::Working {
+                                phase: t.phase,
+                                done: t.done,
+                                total: t.total,
+                                files_seen: t.files_seen,
+                            });
+                        }
+                    },
+                )
+            }));
+            match result {
+                Ok(scan) => {
+                    let _ = tx.send(DuplicateProgress::Done(Arc::new(scan)));
+                }
+                Err(payload) => {
+                    let what = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "未知错误".to_string());
+                    let _ = fail_tx.send(DuplicateProgress::Failed(format!(
+                        "重复文件扫描中断：{what}"
+                    )));
+                }
+            }
+        });
+        Self {
+            rx,
+            latest: DuplicateProgress::Working {
+                phase: molt_scan::DuplicatePhase::Walking,
+                done: 0,
+                total: 0,
+                files_seen: 0,
+            },
+            finished: false,
+        }
+    }
+
+    pub fn poll(&mut self) -> &DuplicateProgress {
+        while let Ok(p) = self.rx.try_recv() {
+            self.latest = p;
+        }
+        if matches!(
+            self.latest,
+            DuplicateProgress::Done(_) | DuplicateProgress::Failed(_)
+        ) {
+            self.finished = true;
+        }
+        &self.latest
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    pub fn peek(&self) -> &DuplicateProgress {
+        &self.latest
+    }
+}
+
+/// 扫描控制句柄：暂停 / 继续 / 取消。后台线程在每个检查点询问它。
+///
+/// 暂停不是「杀掉线程」，而是让遍历循环在检查点停下来等；
+/// 所以恢复后能从同一进度继续，不会从头再来。
+pub struct ScanControl {
+    state: Mutex<ScanControlState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct ScanControlState {
+    paused: bool,
+    cancelled: bool,
+}
+
+impl ScanControl {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(ScanControlState::default()),
+            wake: Condvar::new(),
+        })
+    }
+
+    pub fn pause(&self) {
+        self.state.lock().unwrap().paused = true;
+    }
+
+    pub fn resume(&self) {
+        {
+            let mut st = self.state.lock().unwrap();
+            st.paused = false;
+        }
+        self.wake.notify_all();
+    }
+
+    pub fn cancel(&self) {
+        {
+            let mut st = self.state.lock().unwrap();
+            st.cancelled = true;
+            st.paused = false;
+        }
+        self.wake.notify_all();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.state.lock().unwrap().paused
+    }
+
+    /// 暂停时阻塞在这里，直到被恢复或取消。返回是否已被取消。
+    pub fn wait_if_paused(&self) -> bool {
+        let mut st = self.state.lock().unwrap();
+        while st.paused && !st.cancelled {
+            st = self.wake.wait(st).unwrap();
+        }
+        st.cancelled
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.state.lock().unwrap().cancelled
+    }
+}
 
 /// 扫描进展。
 #[derive(Debug, Clone)]
@@ -195,6 +364,8 @@ pub struct ScanJob {
     rx: Receiver<Progress>,
     pub latest: Progress,
     finished: bool,
+    /// 暂停 / 继续 / 取消的控制句柄，界面按钮直接操作它。
+    pub control: Arc<ScanControl>,
 }
 
 impl ScanJob {
@@ -202,11 +373,13 @@ impl ScanJob {
     pub fn start(rules: RuleSet, home: String, check_locks: bool) -> Self {
         let (tx, rx) = channel();
         let fail_tx = tx.clone();
+        let control = ScanControl::new();
+        let ctl = control.clone();
         std::thread::spawn(move || {
             // 扫描里任何一处 panic 都不能只留在 stderr：窗口那时会永远停在
             // 「正在扫描…」，用户唯一能做的就是强制退出。这里转成一条可见的失败。
             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_scan(rules, home, check_locks, tx)
+                run_scan(rules, home, check_locks, tx, Some(ctl.as_ref()))
             }));
             if let Err(payload) = ran {
                 let what = payload
@@ -221,6 +394,7 @@ impl ScanJob {
             rx,
             latest: Progress::Walking { found: 0 },
             finished: false,
+            control,
         }
     }
 
@@ -262,12 +436,29 @@ impl ScanJob {
 
 /// 真正的扫描。与 CLI 的 `scan::run` 是同一套步骤，
 /// 只是这里多做了进度上报。
-fn run_scan(rules: RuleSet, home: String, check_locks: bool, tx: Sender<Progress>) {
+fn run_scan(
+    rules: RuleSet,
+    home: String,
+    check_locks: bool,
+    tx: Sender<Progress>,
+    control: Option<&ScanControl>,
+) {
     let started = std::time::Instant::now();
     let _ = tx.send(Progress::Walking { found: 0 });
-    let result = scan_with(&rules, &home, check_locks, |p| {
+    let result = scan_with(&rules, &home, check_locks, control, |p| {
         let _ = tx.send(p);
     });
+    // 取消时绝不能补发 `Done`：`poll()` 只保留最后一条，`Done` 会盖掉
+    // 「扫描已取消」，而界面收到 `Done` 会把它 `save_cache` 成扫描结果——
+    // 于是「我取消了」变成「盘里很干净」，下次打开窗口看到的正是这份空缓存。
+    //
+    // 但也不能什么都不发：取消可能发生在扫描已经跑完之后（那时 `scan_with`
+    // 不会走到检查点、也就没发过任何失败），任务就永远等不到终态，
+    // `device` 一侧会一直停在 Scanning、所有按钮永久置灰。所以这里统一补一条终态。
+    if control.is_some_and(|c| c.is_cancelled()) {
+        let _ = tx.send(Progress::Failed("扫描已取消".to_string()));
+        return;
+    }
     let _ = tx.send(Progress::Done(Arc::new(ScanResult {
         elapsed_secs: started.elapsed().as_secs_f32(),
         ..result
@@ -276,7 +467,7 @@ fn run_scan(rules: RuleSet, home: String, check_locks: bool, tx: Sender<Progress
 
 /// 同步扫一次。定时任务与端到端验证用它——它们不画界面，不需要进展回调。
 pub fn scan_all(rules: &RuleSet, home: &str, check_locks: bool) -> ScanResult {
-    scan_with(rules, home, check_locks, |_| {})
+    scan_with(rules, home, check_locks, None, |_| {})
 }
 
 /// 扫描主体。进度通过 `report` 回调发出，两种调用方式共用同一份逻辑，
@@ -285,6 +476,7 @@ fn scan_with(
     rules: &RuleSet,
     home: &str,
     check_locks: bool,
+    control: Option<&ScanControl>,
     report: impl Fn(Progress),
 ) -> ScanResult {
     report(Progress::Walking { found: 0 });
@@ -302,6 +494,13 @@ fn scan_with(
     let mut result = ScanResult::default();
     for (i, (discovered, meta)) in found.into_iter().enumerate() {
         if i % 25 == 0 {
+            // 暂停/取消检查点：暂停时在这里等待，取消则直接结束。
+            if let Some(ctl) = control {
+                if ctl.wait_if_paused() {
+                    report(Progress::Failed("扫描已取消".to_string()));
+                    return result;
+                }
+            }
             report(Progress::Judging { done: i, total });
             report(Progress::Touching {
                 path: discovered.path.display().to_string(),
@@ -526,7 +725,9 @@ impl CleanJob {
                 .with_source(molt_act::CleanSource::Manual)
                 .with_mode(mode);
             let confirmation = molt_act::Confirmation::new(&candidates);
-            let outcome = exec.clean(&candidates, &confirmation);
+            let outcome = exec.clean_with_progress(&candidates, &confirmation, |done, total| {
+                let _ = tx.send(CleanProgress::Working { done, total });
+            });
 
             let report = CleanReport {
                 deleted: outcome.deleted.len(),
@@ -565,6 +766,17 @@ impl CleanJob {
 
     pub fn peek(&self) -> &CleanProgress {
         &self.latest
+    }
+
+    /// 仅供测试与开发版截图预览；正式清理进度始终来自执行器回调。
+    #[cfg(any(test, debug_assertions))]
+    pub fn preview_progress(done: usize, total: usize) -> Self {
+        let (_, rx) = channel();
+        Self {
+            rx,
+            latest: CleanProgress::Working { done, total },
+            finished: false,
+        }
     }
 }
 
@@ -779,6 +991,66 @@ mod tests {
         molt_core::Candidate::new("/x", ItemKind::Dir, v).with_size(bytes, bytes, 1)
     }
 
+    #[test]
+    fn pause_blocks_until_resumed() {
+        let ctl = ScanControl::new();
+        let c2 = ctl.clone();
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let e2 = entered.clone();
+
+        ctl.pause();
+        let t = std::thread::spawn(move || {
+            e2.store(true, std::sync::atomic::Ordering::SeqCst);
+            let cancelled = c2.wait_if_paused();
+            assert!(!cancelled, "恢复路径不应报告取消");
+        });
+        // 给线程一个到达检查点的机会
+        for _ in 0..100 {
+            if entered.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            entered.load(std::sync::atomic::Ordering::SeqCst),
+            "线程应进入检查点并阻塞"
+        );
+        ctl.resume();
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn cancel_wakes_and_reports_cancelled() {
+        let ctl = ScanControl::new();
+        let c2 = ctl.clone();
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let e2 = entered.clone();
+
+        ctl.pause();
+        let t = std::thread::spawn(move || {
+            e2.store(true, std::sync::atomic::Ordering::SeqCst);
+            c2.wait_if_paused()
+        });
+        for _ in 0..100 {
+            if entered.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        ctl.cancel();
+        assert!(
+            t.join().unwrap(),
+            "取消后等待应立即带着 cancelled=true 返回"
+        );
+        assert!(ctl.is_cancelled());
+    }
+
+    #[test]
+    fn not_paused_never_blocks() {
+        let ctl = ScanControl::new();
+        assert!(!ctl.wait_if_paused(), "未暂停时不阻塞也不报告取消");
+    }
+
     /// 列举应用之后，`Done` 里带的必须是**量到的真实体积**。
     ///
     /// 这一条抓的是 2026-10-28 那个 bug：背景线程量完体积只发了一条消息，
@@ -902,6 +1174,7 @@ mod tests {
             rx,
             latest: Progress::Walking { found: 0 },
             finished: false,
+            control: ScanControl::new(),
         };
         job.poll();
         assert!(job.is_finished(), "最后一条是 Done，应算结束");
