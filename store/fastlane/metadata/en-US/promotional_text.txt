@@ -1,1 +1,0 @@
-Caches from Cursor, Claude Code and Codex, plus target and node_modules, add up to tens of GB. Molt says what each costs, moves instead of deletes, restores for 7 days.
